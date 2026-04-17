@@ -4,9 +4,9 @@ nixPkgs = ["python311", "gcc", "postgresql"]
 
 [phases.install]
 cmds = [
-  "python3.11 -m ensurepip --upgrade",
-  "python3.11 -m pip install --upgrade pip",
-  "python3.11 -m pip install --no-cache-dir -r requirements.txt"
+  "python3.11 -m venv /opt/venv",
+  "/opt/venv/bin/pip install --upgrade pip",
+  "/opt/venv/bin/pip install --no-cache-dir -r requirements.txt"
 ]
 
 [start]
