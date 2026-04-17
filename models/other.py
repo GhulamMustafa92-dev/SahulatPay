@@ -29,6 +29,27 @@ class Notification(Base):
     user = relationship("User", back_populates="notifications")
 
 
+class PendingRegistration(Base):
+    """Holds registration data until OTP is verified.
+    Row is deleted on successful /otp/verify (purpose=registration) → user created.
+    Expires after 30 min (cleanup via /register replace or scheduled job)."""
+    __tablename__ = "pending_registrations"
+
+    id            = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    phone_number  = Column(String(20),  unique=True, nullable=False)
+    email         = Column(String(255))
+    full_name     = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    country       = Column(String(100))
+    cnic_number   = Column(String(20))
+    cnic_masked   = Column(String(20))
+    date_of_birth = Column(DateTime(timezone=True))
+    age           = Column(SmallInteger)
+    account_type  = Column(String(20), server_default="individual")
+    expires_at    = Column(DateTime(timezone=True), nullable=False)
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class OtpCode(Base):
     __tablename__ = "otp_codes"
     __table_args__ = (

@@ -11,7 +11,7 @@ from database import get_db
 from limiter  import limiter
 from models.user   import User, DeviceRegistry, RefreshToken, LoginAudit
 from models.wallet import Wallet
-from models.other  import OtpCode
+from models.other  import OtpCode, PendingRegistration
 from schemas.auth  import (
     RegisterRequest, RegisterResponse,
     OtpVerifyRequest, OtpResendRequest,
@@ -140,20 +140,22 @@ async def _log_login(db: AsyncSession, request: Request, user_id: UUID | None, p
 # ══════════════════════════════════════════════════════════════════════════════
 # REGISTER
 # ══════════════════════════════════════════════════════════════════════════════
-@router.post("/register", response_model=RegisterResponse, status_code=201)
+@router.post("/register", response_model=RegisterResponse, status_code=202)
 @limiter.limit("5/hour")
 async def register(
     request: Request,
     body: RegisterRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    """Store registration data in pending_registrations. User is NOT created in
+    the users table until /otp/verify with purpose=registration succeeds."""
     # Normalize phone
     try:
         phone = normalize_phone(body.phone)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Duplicate checks
+    # Reject if already a real registered user
     existing = (await db.execute(select(User).where(User.phone_number == phone))).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="Phone already registered")
@@ -171,32 +173,39 @@ async def register(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    # Create user (tier 0, unverified)
-    user = User(
-        phone_number       = phone,
-        email              = body.email,
-        full_name          = body.full_name,
-        country            = body.country,
-        date_of_birth      = dob,
-        age                = age,
-        password_hash      = hash_password(body.password),
-        cnic_number        = body.cnic_number,
-        cnic_number_masked = cnic_masked,
-        verification_tier  = 0,
-        account_type       = body.account_type,
-    )
-    db.add(user)
-    await db.flush()                                         # get user.id
+    # Replace any stale pending row for this phone
+    existing_pending = (await db.execute(
+        select(PendingRegistration).where(PendingRegistration.phone_number == phone)
+    )).scalar_one_or_none()
+    if existing_pending:
+        await db.delete(existing_pending)
+        await db.flush()
 
-    # Wallet with tier-0 limit (0 PKR — can't transact until OTP verified → tier 1)
-    db.add(Wallet(user_id=user.id, daily_limit=TIER_LIMITS[0]))
+    pending = PendingRegistration(
+        phone_number  = phone,
+        email         = body.email,
+        full_name     = body.full_name,
+        password_hash = hash_password(body.password),
+        country       = body.country,
+        cnic_number   = body.cnic_number,
+        cnic_masked   = cnic_masked,
+        date_of_birth = dob,
+        age           = age,
+        account_type  = body.account_type,
+        expires_at    = _utcnow() + timedelta(minutes=30),
+    )
+    db.add(pending)
     await db.commit()
-    await db.refresh(user)
+    await db.refresh(pending)
 
     # Send registration OTP
     await _generate_and_send_otp(db, phone, "registration")
 
-    return RegisterResponse(user_id=user.id, phone_masked=mask_phone(phone))
+    return RegisterResponse(
+        user_id      = pending.id,      # pending ID — NOT a user ID yet
+        phone_masked = mask_phone(phone),
+        message      = "OTP sent. Verify phone to complete registration.",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -213,23 +222,48 @@ async def otp_verify(body: OtpVerifyRequest, db: AsyncSession = Depends(get_db))
     if not ok:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-    # On registration OTP verify → upgrade tier 0 → 1
+    # On registration OTP verify → create User + Wallet from pending_registrations
     if body.purpose == "registration":
-        user_res = await db.execute(select(User).where(User.phone_number == phone))
-        user = user_res.scalar_one_or_none()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        user.is_verified       = True
-        user.verification_tier = 1
-        # Update wallet daily_limit
-        wallet_res = await db.execute(select(Wallet).where(Wallet.user_id == user.id))
-        wallet = wallet_res.scalar_one()
-        wallet.daily_limit = TIER_LIMITS[1]
+        pending = (await db.execute(
+            select(PendingRegistration).where(PendingRegistration.phone_number == phone)
+        )).scalar_one_or_none()
+        if not pending:
+            raise HTTPException(status_code=404, detail="No pending registration — please register again")
+        if pending.expires_at < _utcnow():
+            await db.delete(pending)
+            await db.commit()
+            raise HTTPException(status_code=410, detail="Registration expired — please register again")
+
+        # Double-check no race: user created concurrently
+        if (await db.execute(select(User).where(User.phone_number == phone))).scalar_one_or_none():
+            await db.delete(pending)
+            await db.commit()
+            raise HTTPException(status_code=409, detail="Phone already registered")
+
+        user = User(
+            phone_number       = pending.phone_number,
+            email              = pending.email,
+            full_name          = pending.full_name,
+            country            = pending.country,
+            date_of_birth      = pending.date_of_birth.date() if pending.date_of_birth else None,
+            age                = pending.age,
+            password_hash      = pending.password_hash,
+            cnic_number        = pending.cnic_number,
+            cnic_number_masked = pending.cnic_masked,
+            account_type       = pending.account_type,
+            verification_tier  = 1,           # Tier 1 — phone verified
+            is_verified        = True,
+        )
+        db.add(user)
+        await db.flush()
+
+        db.add(Wallet(user_id=user.id, daily_limit=TIER_LIMITS[1]))
+        await db.delete(pending)              # remove pending row
         await db.commit()
 
     # Cleanup dev OTP store
     DEV_OTP_STORE.pop(phone, None)
-    return MessageResponse(message="OTP verified")
+    return MessageResponse(message="OTP verified — account activated")
 
 
 @router.post("/otp/resend", response_model=MessageResponse)

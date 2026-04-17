@@ -32,9 +32,9 @@ def main():
         "account_type": "individual",
     })
     if r.status_code == 409:
-        print("⚠  user already exists — run `DELETE FROM users WHERE phone_number='+923001234567'` to reset")
+        print("⚠  user already exists — run cleanup_test.py to reset")
         sys.exit(1)
-    p("register", r.status_code == 201, f"{r.status_code} {r.json()}")
+    p("register (202 pending)", r.status_code == 202, f"{r.status_code} {r.json()}")
 
     # ── 2. Retrieve OTP from DEV endpoint ──
     r = c.get(f"/dev/otp/+92{PHONE[1:]}")

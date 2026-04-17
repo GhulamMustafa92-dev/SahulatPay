@@ -9,7 +9,7 @@ from models.rewards     import Reward, OfferTemplate, RewardOffer, RewardTransac
 from models.social      import TrustedCircle, BillSplit, SplitParticipant
 from models.ai          import AiInsight, ChatSession
 from models.bank        import BankAccount
-from models.other       import Notification, OtpCode, FraudFlag, AdminAction, ZakatCalculation
+from models.other       import Notification, PendingRegistration, OtpCode, FraudFlag, AdminAction, ZakatCalculation
 
 __all__ = [
     "User", "DeviceRegistry", "RefreshToken", "LoginAudit",
@@ -23,5 +23,5 @@ __all__ = [
     "TrustedCircle", "BillSplit", "SplitParticipant",
     "AiInsight", "ChatSession",
     "BankAccount",
-    "Notification", "OtpCode", "FraudFlag", "AdminAction", "ZakatCalculation",
+    "Notification", "PendingRegistration", "OtpCode", "FraudFlag", "AdminAction", "ZakatCalculation",
 ]
