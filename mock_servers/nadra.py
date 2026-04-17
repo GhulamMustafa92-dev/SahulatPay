@@ -1,4 +1,5 @@
 """Mock NADRA verification server — CNIC lookup, biometric simulation."""
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -17,9 +18,6 @@ class CNICVerifyRequest(BaseModel):
 class BiometricRequest(BaseModel):
     cnic: str
     biometric_data: str = "mock_fingerprint_hash"
-
-
-from typing import Optional
 
 
 # ── POST /mock/nadra/verify ───────────────────────────────────────────────────

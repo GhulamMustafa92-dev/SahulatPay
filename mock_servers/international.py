@@ -27,7 +27,7 @@ RATES = {
     "SAR": 74.00,
     "CAD": 205.40,
     "AUD": 183.60,
-    "EUR": 302.80,
+    "CNY": 38.20,
 }
 
 PROVIDER_FEES = {
