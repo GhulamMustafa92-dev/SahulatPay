@@ -17,16 +17,18 @@ async def lifespan(app: FastAPI):
     # Firebase init
     _init_firebase()
 
-    # Schedulers started in Prompt 06 — placeholder
+    # Subscription scheduler (PROMPT 05b)
+    from scheduler.subscription_scheduler import start_subscription_scheduler, stop_subscription_scheduler
+    start_subscription_scheduler()
+
+    # Savings scheduler started in Prompt 06
     # from scheduler.savings_scheduler import start_savings_scheduler
-    # from scheduler.card_scheduler import start_card_scheduler
     # start_savings_scheduler()
-    # start_card_scheduler()
 
     yield
 
     # ── Shutdown ──
-    # scheduler.shutdown() added in Prompt 06
+    stop_subscription_scheduler()
     print("[shutdown] server stopping")
 
 

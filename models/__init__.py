@@ -1,7 +1,7 @@
 from models.user        import User, DeviceRegistry, RefreshToken, LoginAudit
 from models.wallet      import Wallet
 from models.transaction import Transaction
-from models.card        import VirtualCard
+from models.card        import VirtualCard, CardSubscription
 from models.kyc         import Document, FingerprintScan, BusinessProfile
 from models.savings     import SavingGoal
 from models.finance     import Investment, InsurancePolicy, HighYieldDeposit
@@ -15,7 +15,7 @@ __all__ = [
     "User", "DeviceRegistry", "RefreshToken", "LoginAudit",
     "Wallet",
     "Transaction",
-    "VirtualCard",
+    "VirtualCard", "CardSubscription",
     "Document", "FingerprintScan", "BusinessProfile",
     "SavingGoal",
     "Investment", "InsurancePolicy", "HighYieldDeposit",

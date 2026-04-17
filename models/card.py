@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, SmallInteger, Numeric, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, Boolean, SmallInteger, Numeric, DateTime, Date, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -42,4 +42,24 @@ class VirtualCard(Base):
     issued_at                = Column(DateTime(timezone=True), server_default=func.now())
     created_at               = Column(DateTime(timezone=True), server_default=func.now())
 
-    user = relationship("User", back_populates="virtual_cards")
+    user          = relationship("User",             back_populates="virtual_cards")
+    subscriptions = relationship("CardSubscription", back_populates="card", cascade="all, delete-orphan")
+
+
+class CardSubscription(Base):
+    __tablename__ = "card_subscriptions"
+
+    id             = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    card_id        = Column(UUID(as_uuid=True), ForeignKey("virtual_cards.id", ondelete="CASCADE"), nullable=False)
+    user_id        = Column(UUID(as_uuid=True), ForeignKey("users.id",         ondelete="CASCADE"), nullable=False)
+    service_name   = Column(String(100), nullable=False)
+    service_code   = Column(String(50),  nullable=False)
+    amount         = Column(Numeric(12, 2), nullable=False)
+    billing_cycle  = Column(String(20), server_default="monthly")   # monthly | yearly
+    renewal_date   = Column(Date, nullable=False)
+    is_active      = Column(Boolean, server_default="true")
+    created_at     = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at     = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    card = relationship("VirtualCard", back_populates="subscriptions")
+    user = relationship("User")

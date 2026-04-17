@@ -26,6 +26,7 @@ slowapi==0.1.9
 
 # ── Scheduler (auto-deduction + monthly card reset) ───────────────────────────
 apscheduler==3.10.4
+python-dateutil==2.9.0
 
 # ── Firebase FCM ──────────────────────────────────────────────────────────────
 firebase-admin==6.5.0

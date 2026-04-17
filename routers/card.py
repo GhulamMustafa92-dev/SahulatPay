@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_db
 from limiter import limiter
-from models.card import VirtualCard
+from models.card import VirtualCard, CardSubscription
 from models.transaction import Transaction
 from models.user import User
 from schemas.card import (
@@ -615,3 +615,127 @@ async def delete_card(
     await db.delete(card)
     await db.commit()
     return MessageResponse(message=f"Card ****{card.last_four} deleted permanently")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SUBSCRIPTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+from datetime import date
+from dateutil.relativedelta import relativedelta
+from pydantic import BaseModel
+
+
+class SubscriptionAddRequest(BaseModel):
+    service_name:  str
+    service_code:  str
+    amount:        Decimal
+    billing_cycle: str = "monthly"
+    start_date:    date
+
+
+class SubscriptionResponse(BaseModel):
+    id:            UUID
+    card_id:       UUID
+    service_name:  str
+    service_code:  str
+    amount:        Decimal
+    billing_cycle: str
+    renewal_date:  date
+    is_active:     bool
+    created_at:    datetime
+
+    class Config:
+        from_attributes = True
+
+
+# GET /cards/{id}/subscriptions
+@router.get("/{card_id}/subscriptions", response_model=list[SubscriptionResponse])
+async def list_subscriptions(
+    card_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession    = Depends(get_db),
+):
+    await _get_card_or_404(card_id, current_user.id, db)
+    subs = (await db.execute(
+        select(CardSubscription)
+        .where(CardSubscription.card_id == card_id, CardSubscription.user_id == current_user.id)
+        .order_by(desc(CardSubscription.created_at))
+    )).scalars().all()
+    return subs
+
+
+# POST /cards/{id}/subscriptions
+@router.post("/{card_id}/subscriptions", response_model=SubscriptionResponse, status_code=201)
+async def add_subscription(
+    card_id: UUID,
+    body: SubscriptionAddRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession    = Depends(get_db),
+):
+    await _get_card_or_404(card_id, current_user.id, db)
+    delta = relativedelta(months=1) if body.billing_cycle == "monthly" else relativedelta(years=1)
+    renewal = body.start_date + delta
+    sub = CardSubscription(
+        card_id       = card_id,
+        user_id       = current_user.id,
+        service_name  = body.service_name,
+        service_code  = body.service_code.lower(),
+        amount        = body.amount,
+        billing_cycle = body.billing_cycle,
+        renewal_date  = renewal,
+    )
+    db.add(sub)
+    await db.commit()
+    await db.refresh(sub)
+    return sub
+
+
+# PATCH /cards/{id}/subscriptions/{sub_id}/toggle
+@router.patch("/{card_id}/subscriptions/{sub_id}/toggle", response_model=MessageResponse)
+async def toggle_subscription(
+    card_id: UUID,
+    sub_id:  UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession    = Depends(get_db),
+):
+    await _get_card_or_404(card_id, current_user.id, db)
+    sub = (await db.execute(
+        select(CardSubscription).where(
+            CardSubscription.id      == sub_id,
+            CardSubscription.card_id == card_id,
+            CardSubscription.user_id == current_user.id,
+        )
+    )).scalar_one_or_none()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    sub.is_active = not sub.is_active
+    await db.commit()
+    msg = (
+        "Subscription reactivated" if sub.is_active
+        else "Charges blocked. Service may auto-cancel on next failed payment."
+    )
+    return MessageResponse(message=msg)
+
+
+# DELETE /cards/{id}/subscriptions/{sub_id}
+@router.delete("/{card_id}/subscriptions/{sub_id}", response_model=MessageResponse)
+async def delete_subscription(
+    card_id: UUID,
+    sub_id:  UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession    = Depends(get_db),
+):
+    await _get_card_or_404(card_id, current_user.id, db)
+    sub = (await db.execute(
+        select(CardSubscription).where(
+            CardSubscription.id      == sub_id,
+            CardSubscription.card_id == card_id,
+            CardSubscription.user_id == current_user.id,
+        )
+    )).scalar_one_or_none()
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    await db.delete(sub)
+    await db.commit()
+    return MessageResponse(message=f"{sub.service_name} subscription removed")
