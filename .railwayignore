@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.local
+test_*.py
+cleanup_test.py
+verify_flow.py
+test_firebase_real.py
+*.md
+.git/
+.gitignore
+.vscode/
+.idea/

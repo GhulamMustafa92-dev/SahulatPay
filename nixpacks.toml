@@ -1,0 +1,9 @@
+# Nixpacks build config for Railway — pins Python 3.11 (matches your local dev)
+[phases.setup]
+nixPkgs = ["python311", "gcc", "postgresql"]
+
+[phases.install]
+cmds = ["pip install --no-cache-dir -r requirements.txt"]
+
+[start]
+cmd = "bash start.sh"

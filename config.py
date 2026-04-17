@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
 from typing import Optional
 
 
@@ -48,6 +49,21 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
     DEV_MODE: bool = True
+    PORT: int = 8000                      # Railway sets this automatically
+
+    # ── VALIDATORS ────────────────────────────────────────────────────────────
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def _normalize_db_url(cls, v: str) -> str:
+        """Railway & Heroku inject DATABASE_URL as `postgres://` —
+        SQLAlchemy 2.x + asyncpg requires `postgresql+asyncpg://`."""
+        if not v:
+            return v
+        if v.startswith("postgres://"):
+            v = v.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif v.startswith("postgresql://") and "+asyncpg" not in v:
+            v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
 
 
 settings = Settings()
