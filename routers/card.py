@@ -1,6 +1,4 @@
 """Cards router — issue, manage, pay, ATM withdraw (PROMPT 05)."""
-from __future__ import annotations
-
 import hashlib
 import random
 import secrets
