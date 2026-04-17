@@ -16,7 +16,8 @@ from schemas.auth  import (
     RegisterRequest, RegisterResponse,
     OtpVerifyRequest, OtpResendRequest,
     LoginRequest, LoginResponse, TokenPair,
-    NewDeviceVerifyRequest, PinLoginRequest, BiometricLoginRequest,
+    NewDeviceVerifyRequest, NewDeviceFirebaseRequest,
+    PinLoginRequest, BiometricLoginRequest,
     RefreshRequest, PasswordResetInitiate, PasswordResetComplete,
     PinSetRequest, PinVerifyRequest, MessageResponse,
 )
@@ -27,6 +28,7 @@ from services.auth_service import (
     hash_pin, verify_pin,
     hash_otp, verify_otp, generate_otp,
     send_otp_sms,
+    verify_firebase_phone_token,
     create_access_token, create_refresh_token, create_session_token,
     decode_token, hash_refresh_token,
     get_current_user,
@@ -140,22 +142,33 @@ async def _log_login(db: AsyncSession, request: Request, user_id: UUID | None, p
 # ══════════════════════════════════════════════════════════════════════════════
 # REGISTER
 # ══════════════════════════════════════════════════════════════════════════════
-@router.post("/register", response_model=RegisterResponse, status_code=202)
+@router.post("/register", response_model=RegisterResponse, status_code=201)
 @limiter.limit("5/hour")
 async def register(
     request: Request,
     body: RegisterRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Store registration data in pending_registrations. User is NOT created in
-    the users table until /otp/verify with purpose=registration succeeds."""
+    """Register a new user. Android app must first complete Firebase Phone Auth
+    and pass the resulting ID token. Backend verifies the token and creates the
+    user + wallet + trusted device + tokens atomically.
+
+    In DEV_MODE, pass `firebase_id_token="dev-bypass-token"` to skip Firebase verify.
+    """
     # Normalize phone
     try:
         phone = normalize_phone(body.phone)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Reject if already a real registered user
+    # ── Firebase verification — SMS OTP already consumed on client side ──
+    verified = await verify_firebase_phone_token(body.firebase_id_token, phone)
+    if not verified:
+        raise HTTPException(status_code=401,
+            detail="Firebase phone verification failed. The token is invalid, "
+                   "expired, or does not match the provided phone number.")
+
+    # Duplicate checks
     existing = (await db.execute(select(User).where(User.phone_number == phone))).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="Phone already registered")
@@ -173,38 +186,48 @@ async def register(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    # Replace any stale pending row for this phone
-    existing_pending = (await db.execute(
-        select(PendingRegistration).where(PendingRegistration.phone_number == phone)
-    )).scalar_one_or_none()
-    if existing_pending:
-        await db.delete(existing_pending)
-        await db.flush()
-
-    pending = PendingRegistration(
-        phone_number  = phone,
-        email         = body.email,
-        full_name     = body.full_name,
-        password_hash = hash_password(body.password),
-        country       = body.country,
-        cnic_number   = body.cnic_number,
-        cnic_masked   = cnic_masked,
-        date_of_birth = dob,
-        age           = age,
-        account_type  = body.account_type,
-        expires_at    = _utcnow() + timedelta(minutes=30),
+    # ── Create user (tier 1, is_verified=True — phone already verified by Firebase) ──
+    user = User(
+        phone_number       = phone,
+        email              = body.email,
+        full_name          = body.full_name,
+        country            = body.country,
+        date_of_birth      = dob,
+        age                = age,
+        password_hash      = hash_password(body.password),
+        cnic_number        = body.cnic_number,
+        cnic_number_masked = cnic_masked,
+        account_type       = body.account_type,
+        verification_tier  = 1,
+        is_verified        = True,
     )
-    db.add(pending)
-    await db.commit()
-    await db.refresh(pending)
+    db.add(user)
+    await db.flush()
 
-    # Send registration OTP
-    await _generate_and_send_otp(db, phone, "registration")
+    # Wallet with tier-1 limit
+    db.add(Wallet(user_id=user.id, daily_limit=TIER_LIMITS[1]))
+
+    # Trust the registering device (first device is trusted automatically — just
+    # passed Firebase phone verification)
+    db.add(DeviceRegistry(
+        user_id            = user.id,
+        device_fingerprint = body.device_fingerprint,
+        device_name        = body.device_name,
+        device_os          = body.device_os,
+        is_trusted         = True,
+        trusted_at         = _utcnow(),
+    ))
+    await db.commit()
+    await db.refresh(user)
+
+    # Auto-login — issue tokens
+    tokens = await _issue_tokens(db, user, body.device_fingerprint)
+    await _log_login(db, request, user.id, phone, body.device_fingerprint, True, "register_firebase")
 
     return RegisterResponse(
-        user_id      = pending.id,      # pending ID — NOT a user ID yet
+        user_id      = user.id,
         phone_masked = mask_phone(phone),
-        message      = "OTP sent. Verify phone to complete registration.",
+        tokens       = tokens,
     )
 
 
@@ -218,52 +241,18 @@ async def otp_verify(body: OtpVerifyRequest, db: AsyncSession = Depends(get_db))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Registration now uses Firebase Phone Auth in /register — no OTP step needed.
+    # This endpoint handles: password_reset, security_change, bank_link, new_device.
+    if body.purpose == "registration":
+        raise HTTPException(status_code=400,
+            detail="Registration uses Firebase Phone Auth. Call /register with firebase_id_token.")
+
     ok = await _verify_and_consume_otp(db, phone, body.otp, body.purpose)
     if not ok:
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
-    # On registration OTP verify → create User + Wallet from pending_registrations
-    if body.purpose == "registration":
-        pending = (await db.execute(
-            select(PendingRegistration).where(PendingRegistration.phone_number == phone)
-        )).scalar_one_or_none()
-        if not pending:
-            raise HTTPException(status_code=404, detail="No pending registration — please register again")
-        if pending.expires_at < _utcnow():
-            await db.delete(pending)
-            await db.commit()
-            raise HTTPException(status_code=410, detail="Registration expired — please register again")
-
-        # Double-check no race: user created concurrently
-        if (await db.execute(select(User).where(User.phone_number == phone))).scalar_one_or_none():
-            await db.delete(pending)
-            await db.commit()
-            raise HTTPException(status_code=409, detail="Phone already registered")
-
-        user = User(
-            phone_number       = pending.phone_number,
-            email              = pending.email,
-            full_name          = pending.full_name,
-            country            = pending.country,
-            date_of_birth      = pending.date_of_birth.date() if pending.date_of_birth else None,
-            age                = pending.age,
-            password_hash      = pending.password_hash,
-            cnic_number        = pending.cnic_number,
-            cnic_number_masked = pending.cnic_masked,
-            account_type       = pending.account_type,
-            verification_tier  = 1,           # Tier 1 — phone verified
-            is_verified        = True,
-        )
-        db.add(user)
-        await db.flush()
-
-        db.add(Wallet(user_id=user.id, daily_limit=TIER_LIMITS[1]))
-        await db.delete(pending)              # remove pending row
-        await db.commit()
-
-    # Cleanup dev OTP store
     DEV_OTP_STORE.pop(phone, None)
-    return MessageResponse(message="OTP verified — account activated")
+    return MessageResponse(message="OTP verified")
 
 
 @router.post("/otp/resend", response_model=MessageResponse)
@@ -384,6 +373,53 @@ async def login_new_device_verify(
     await _log_login(db, request, user.id, user.phone_number, dfp, True, "new_device_verified")
     return LoginResponse(status="authenticated", tokens=tokens,
                          message="Device trusted. Login successful.")
+
+
+@router.post("/login/new-device/firebase", response_model=LoginResponse)
+async def login_new_device_firebase(
+    request: Request, body: NewDeviceFirebaseRequest, db: AsyncSession = Depends(get_db),
+):
+    """Alternative to /login/new-device/verify that uses Firebase Phone Auth
+    instead of a backend-sent OTP. The Android app completes Firebase Phone Auth
+    for the user's registered phone, then sends the ID token here."""
+    payload = decode_token(body.session_token)
+    if payload.get("type") != "session" or payload.get("prp") != "new_device":
+        raise HTTPException(status_code=400, detail="Invalid session token")
+
+    user_id = UUID(payload["sub"])
+    dfp     = payload["dfp"]
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    verified = await verify_firebase_phone_token(body.firebase_id_token, user.phone_number)
+    if not verified:
+        raise HTTPException(status_code=401, detail="Firebase verification failed")
+
+    # Trust the device
+    dev_res = await db.execute(
+        select(DeviceRegistry).where(
+            DeviceRegistry.user_id == user.id,
+            DeviceRegistry.device_fingerprint == dfp,
+        )
+    )
+    device = dev_res.scalar_one_or_none()
+    if device:
+        device.is_trusted   = True
+        device.trusted_at   = _utcnow()
+        device.last_seen_at = _utcnow()
+    else:
+        db.add(DeviceRegistry(
+            user_id=user.id, device_fingerprint=dfp,
+            is_trusted=True, trusted_at=_utcnow(),
+        ))
+    await db.commit()
+
+    tokens = await _issue_tokens(db, user, dfp)
+    await _log_login(db, request, user.id, user.phone_number, dfp, True, "new_device_firebase")
+    return LoginResponse(status="authenticated", tokens=tokens,
+                         message="Device trusted via Firebase. Login successful.")
 
 
 @router.post("/login/pin", response_model=TokenPair)

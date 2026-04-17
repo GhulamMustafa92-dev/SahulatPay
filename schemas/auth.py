@@ -8,19 +8,25 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 # ── Register ──────────────────────────────────────────────────────────────────
 class RegisterRequest(BaseModel):
-    phone:        str               = Field(..., description="+92XXXXXXXXXX or 03XXXXXXXXX")
-    email:        Optional[EmailStr] = None
-    full_name:    str               = Field(..., min_length=2, max_length=255)
-    password:     str               = Field(..., min_length=8, max_length=128)
-    country:      str               = Field(default="Pakistan", max_length=100)
-    cnic_number:  Optional[str]     = Field(default=None, description="XXXXX-XXXXXXX-X (optional)")
-    account_type: Literal["individual", "business"] = "individual"
+    phone:              str               = Field(..., description="+92XXXXXXXXXX or 03XXXXXXXXX")
+    firebase_id_token:  str               = Field(..., description="Firebase Phone Auth ID token (from Android SDK)")
+    email:              Optional[EmailStr] = None
+    full_name:          str               = Field(..., min_length=2, max_length=255)
+    password:           str               = Field(..., min_length=8, max_length=128)
+    country:            str               = Field(default="Pakistan", max_length=100)
+    cnic_number:        Optional[str]     = Field(default=None, description="XXXXX-XXXXXXX-X (optional)")
+    account_type:       Literal["individual", "business"] = "individual"
+    device_fingerprint: str               = Field(..., min_length=16, max_length=255,
+                                                   description="SHA-256(device_id+model+os). Becomes a trusted device.")
+    device_name:        Optional[str]     = None
+    device_os:          Optional[str]     = None
 
 
 class RegisterResponse(BaseModel):
     user_id:      UUID
     phone_masked: str
-    message:      str = "OTP sent. Verify phone to activate account."
+    tokens:       "TokenPair"          # user is immediately logged in after register
+    message:      str = "Account created and verified via Firebase."
 
 
 # ── OTP ───────────────────────────────────────────────────────────────────────
@@ -49,6 +55,12 @@ class LoginRequest(BaseModel):
 class NewDeviceVerifyRequest(BaseModel):
     otp:           str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
     session_token: str
+
+
+class NewDeviceFirebaseRequest(BaseModel):
+    """Verify a new device using Firebase Phone Auth instead of backend OTP."""
+    firebase_id_token: str
+    session_token:     str
 
 
 class PinLoginRequest(BaseModel):
@@ -105,3 +117,7 @@ class PinVerifyRequest(BaseModel):
 # ── Generic ───────────────────────────────────────────────────────────────────
 class MessageResponse(BaseModel):
     message: str
+
+
+# Resolve forward references (RegisterResponse → TokenPair)
+RegisterResponse.model_rebuild()

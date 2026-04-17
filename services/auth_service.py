@@ -97,7 +97,39 @@ def generate_otp() -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Infobip OTP SMS
+# Firebase Phone Auth — verify ID token from Android app
+# ══════════════════════════════════════════════════════════════════════════════
+# Dev bypass: in DEV_MODE, send this token to skip Firebase verification
+DEV_FIREBASE_BYPASS = "dev-bypass-token"
+
+
+async def verify_firebase_phone_token(id_token: str, expected_phone: str) -> bool:
+    """Verify a Firebase ID token. Returns True iff:
+    - Token is valid (signed + not expired)
+    - sign_in_provider == 'phone'
+    - Decoded phone_number == expected_phone (already normalized to +92...)
+    """
+    # Dev bypass
+    if settings.DEV_MODE and id_token == DEV_FIREBASE_BYPASS:
+        print(f"[FIREBASE-DEV-BYPASS] accepting phone {expected_phone}")
+        return True
+
+    try:
+        from firebase_admin import auth as fb_auth
+        decoded = fb_auth.verify_id_token(id_token)
+    except Exception as e:
+        print(f"[FIREBASE] verify_id_token failed: {e}")
+        return False
+
+    if decoded.get("firebase", {}).get("sign_in_provider") != "phone":
+        return False
+
+    token_phone = decoded.get("phone_number")
+    return token_phone == expected_phone
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Infobip OTP SMS (legacy — kept for password reset / bank link fallback)
 # ══════════════════════════════════════════════════════════════════════════════
 async def send_otp_sms(phone: str, otp: str) -> bool:
     """Send OTP via Infobip REST API. In DEV_MODE (no API key), store in-memory instead."""

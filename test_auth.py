@@ -21,48 +21,26 @@ def p(label, ok, details=""):
 def main():
     c = httpx.Client(base_url=BASE, timeout=10.0)
 
-    # ── 1. Register ──
+    # ── 1. Register (Firebase dev-bypass) — user created + tokens returned ──
     r = c.post("/register", json={
         "phone":     PHONE,
+        "firebase_id_token": "dev-bypass-token",    # DEV_MODE-only
         "email":     EMAIL,
         "full_name": "Test User",
         "password":  PWD,
         "country":   "Pakistan",
         "cnic_number": "42101-1234567-1",
         "account_type": "individual",
+        "device_fingerprint": DFP,
+        "device_name": "Test Device",
+        "device_os":   "Android 14",
     })
     if r.status_code == 409:
         print("⚠  user already exists — run cleanup_test.py to reset")
         sys.exit(1)
-    p("register (202 pending)", r.status_code == 202, f"{r.status_code} {r.json()}")
-
-    # ── 2. Retrieve OTP from DEV endpoint ──
-    r = c.get(f"/dev/otp/+92{PHONE[1:]}")
-    p("dev/otp retrieve", r.status_code == 200, str(r.json()))
-    otp = r.json()["otp"]
-
-    # ── 3. Verify OTP ──
-    r = c.post("/otp/verify", json={"phone": PHONE, "otp": otp, "purpose": "registration"})
-    p("otp/verify", r.status_code == 200, r.text)
-
-    # ── 4. Login (new device — triggers OTP) ──
-    r = c.post("/login", json={
-        "phone": PHONE, "password": PWD, "device_fingerprint": DFP,
-        "device_name": "Test Device", "device_os": "Android 14",
-    })
-    p("login (new device)", r.status_code == 200 and r.json()["status"] == "otp_required",
-      r.json().get("status"))
-    session_token = r.json()["session_token"]
-
-    # ── 5. Fetch new-device OTP ──
-    r = c.get(f"/dev/otp/+92{PHONE[1:]}")
-    otp2 = r.json()["otp"]
-
-    # ── 6. Verify new device ──
-    r = c.post("/login/new-device/verify", json={"otp": otp2, "session_token": session_token})
-    p("login/new-device/verify", r.status_code == 200 and r.json()["status"] == "authenticated",
-      r.json().get("status"))
-    tokens = r.json()["tokens"]
+    p("register (Firebase)", r.status_code == 201 and "tokens" in r.json(),
+      f"{r.status_code}")
+    tokens  = r.json()["tokens"]
     access  = tokens["access_token"]
     refresh = tokens["refresh_token"]
 
