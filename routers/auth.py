@@ -626,7 +626,25 @@ async def pin_verify(body: PinVerifyRequest, db: AsyncSession = Depends(get_db),
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DEV — retrieve OTP (DEV_MODE only)
+# PATCH /auth/fcm-token   (Android calls this on login + token refresh)
+# ══════════════════════════════════════════════════════════════════════════════
+from pydantic import BaseModel as _BaseModel
+
+class _FcmTokenRequest(_BaseModel):
+    fcm_token: str
+
+@router.patch("/fcm-token", response_model=MessageResponse)
+async def update_fcm_token(
+    body: _FcmTokenRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Android app calls this after login or whenever FirebaseMessaging gives a new token."""
+    current_user.fcm_token = body.fcm_token
+    await db.commit()
+    return MessageResponse(message="FCM token updated. Push notifications are active.")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 if settings.DEV_MODE:
     @router.get("/dev/otp/{phone}")

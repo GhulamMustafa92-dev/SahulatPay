@@ -32,14 +32,20 @@ async def lifespan(app: FastAPI):
     from scheduler.subscription_scheduler import start_subscription_scheduler, stop_subscription_scheduler
     start_subscription_scheduler()
 
-    # Savings scheduler started in Prompt 06
-    # from scheduler.savings_scheduler import start_savings_scheduler
-    # start_savings_scheduler()
+    # Savings auto-deduction scheduler (PROMPT 06)
+    from scheduler.savings_scheduler import start_savings_scheduler, stop_savings_scheduler
+    start_savings_scheduler()
+
+    # Card monthly-reset scheduler (PROMPT 06)
+    from scheduler.card_scheduler import start_card_scheduler, stop_card_scheduler
+    start_card_scheduler()
 
     yield
 
     # ── Shutdown ──
     stop_subscription_scheduler()
+    stop_savings_scheduler()
+    stop_card_scheduler()
     print("[shutdown] server stopping")
 
 
@@ -143,8 +149,8 @@ app.include_router(mock_qr.router,         prefix="/mock/qr",            tags=["
 from routers import card
 app.include_router(card.router, prefix="/api/v1/cards", tags=["Cards"])
 
-# from routers import savings
-# app.include_router(savings.router, prefix="/api/v1/savings", tags=["Savings"])
+from routers import savings
+app.include_router(savings.router, prefix="/api/v1/savings", tags=["Savings"])
 
 # from routers import finance
 # app.include_router(finance.router, prefix="/api/v1", tags=["Finance"])
