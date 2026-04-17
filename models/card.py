@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Boolean, SmallInteger, Numeric, DateTime, ForeignKey
+from sqlalchemy import Column, String, Boolean, SmallInteger, Numeric, DateTime, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -36,6 +36,9 @@ class VirtualCard(Base):
     is_atm_enabled           = Column(Boolean, server_default="false")
     is_contactless           = Column(Boolean, server_default="true")
     physical_requested       = Column(Boolean, server_default="false")
+    card_number_encrypted    = Column(Text)                                        # Fernet AES-256 — for details display
+    cvv_encrypted            = Column(Text)                                        # Fernet AES-256 — for details display
+    delivery_status          = Column(String(50))                                  # null=virtual; processing|dispatched|in_transit|out_for_delivery|delivered
     issued_at                = Column(DateTime(timezone=True), server_default=func.now())
     created_at               = Column(DateTime(timezone=True), server_default=func.now())
 

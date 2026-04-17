@@ -106,8 +106,8 @@ app.include_router(wallet.router, prefix="/api/v1/wallets", tags=["Wallet"])
 # from routers import transaction
 # app.include_router(transaction.router, prefix="/api/v1/transactions", tags=["Transactions"])
 
-# from routers import card
-# app.include_router(card.router, prefix="/api/v1/cards", tags=["Cards"])
+from routers import card
+app.include_router(card.router, prefix="/api/v1/cards", tags=["Cards"])
 
 # from routers import savings
 # app.include_router(savings.router, prefix="/api/v1/savings", tags=["Savings"])
