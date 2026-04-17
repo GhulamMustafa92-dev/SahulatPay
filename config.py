@@ -41,7 +41,11 @@ class Settings(BaseSettings):
     FACE_API_KEY: str = ""
     FACE_API_SECRET: str = ""
 
-    # ── FIREBASE FCM ──────────────────────────────────────────────────────────
+    # ── STRIPE ────────────────────────────────────────────────────────────────────
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+
+    # ── FIREBASE FCM ──────────────────────────────────────────────────────────────
     FIREBASE_CREDENTIALS_JSON: Optional[str] = None
     FIREBASE_CREDENTIALS_BASE64: Optional[str] = None
 

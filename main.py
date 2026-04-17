@@ -17,6 +17,17 @@ async def lifespan(app: FastAPI):
     # Firebase init
     _init_firebase()
 
+    # Mock SQLite DB — create tables + seed data
+    from mock_servers.db import create_all_tables
+    from mock_servers.seeds import seed_all
+    from mock_servers.db import SessionLocal as MockSession
+    create_all_tables()
+    mock_db = MockSession()
+    try:
+        seed_all(mock_db)
+    finally:
+        mock_db.close()
+
     # Subscription scheduler (PROMPT 05b)
     from scheduler.subscription_scheduler import start_subscription_scheduler, stop_subscription_scheduler
     start_subscription_scheduler()
@@ -105,8 +116,29 @@ app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])
 from routers import wallet
 app.include_router(wallet.router, prefix="/api/v1/wallets", tags=["Wallet"])
 
-# from routers import transaction
-# app.include_router(transaction.router, prefix="/api/v1/transactions", tags=["Transactions"])
+from routers import transaction
+app.include_router(transaction.router, prefix="/api/v1/transactions", tags=["Transactions"])
+
+from routers import external
+app.include_router(external.router, prefix="/api/v1/external", tags=["External Services"])
+
+from routers import stripe_router
+app.include_router(stripe_router.router, prefix="/api/v1/stripe", tags=["Stripe"])
+
+from mock_servers import wallets as mock_wallets, banks as mock_banks, bills as mock_bills
+from mock_servers import topup as mock_topup, merchants as mock_merchants
+from mock_servers import nadra as mock_nadra, international as mock_intl
+from mock_servers import insurance as mock_insurance, investments as mock_investments, qr as mock_qr
+app.include_router(mock_wallets.router,    prefix="/mock/wallets",       tags=["Mock: Wallets"])
+app.include_router(mock_banks.router,      prefix="/mock/banks",         tags=["Mock: Banks"])
+app.include_router(mock_bills.router,      prefix="/mock/bills",         tags=["Mock: Bills"])
+app.include_router(mock_topup.router,      prefix="/mock/topup",         tags=["Mock: Top-up"])
+app.include_router(mock_merchants.router,  prefix="/mock/merchants",     tags=["Mock: Merchants"])
+app.include_router(mock_nadra.router,      prefix="/mock/nadra",         tags=["Mock: NADRA"])
+app.include_router(mock_intl.router,       prefix="/mock/international", tags=["Mock: International"])
+app.include_router(mock_insurance.router,  prefix="/mock/insurance",     tags=["Mock: Insurance"])
+app.include_router(mock_investments.router,prefix="/mock/investments",   tags=["Mock: Investments"])
+app.include_router(mock_qr.router,         prefix="/mock/qr",            tags=["Mock: QR"])
 
 from routers import card
 app.include_router(card.router, prefix="/api/v1/cards", tags=["Cards"])

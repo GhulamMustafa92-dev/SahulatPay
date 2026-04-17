@@ -38,6 +38,9 @@ openai==1.35.0
 cloudinary==1.40.0
 aiohttp==3.9.5                  # async HTTP for OCR.space + Face++ + metals.live
 
+# ── Stripe (real payment integration) ────────────────────────────────────────
+stripe==10.5.0
+
 # ── QR Code ───────────────────────────────────────────────────────────────────
 qrcode[pil]==7.4.2
 pillow==10.3.0
