@@ -643,11 +643,9 @@ async def update_fcm_token(
 if settings.DEV_MODE:
     @router.get("/dev/otp/{phone}")
     async def dev_get_otp(phone: str):
+        from services.auth_service import DEV_FIXED_OTP
         try:
             phone = normalize_phone(phone)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        otp = DEV_OTP_STORE.get(phone)
-        if not otp:
-            raise HTTPException(status_code=404, detail="No OTP found for this phone")
-        return {"phone": phone, "otp": otp}
+        return {"phone": phone, "otp": DEV_FIXED_OTP}

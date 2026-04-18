@@ -91,8 +91,13 @@ hash_otp   = hash_password
 verify_otp = verify_password
 
 
+DEV_FIXED_OTP = "123456"
+
+
 def generate_otp() -> str:
-    """6-digit numeric OTP, cryptographically random."""
+    """6-digit numeric OTP. In DEV_MODE always returns 123456 for cross-worker consistency."""
+    if settings.DEV_MODE:
+        return DEV_FIXED_OTP
     return f"{secrets.randbelow(1_000_000):06d}"
 
 
