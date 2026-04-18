@@ -42,6 +42,7 @@ class User(Base):
     fingerprint_verified = Column(Boolean, server_default="false")
     nadra_verified       = Column(Boolean, server_default="false")
     fcm_token            = Column(Text)
+    fcm_token_updated_at = Column(DateTime(timezone=True))
     login_attempts       = Column(SmallInteger, server_default="0")
     profile_photo_url    = Column(Text)
     member_since         = Column(DateTime(timezone=True), server_default=func.now())
@@ -75,6 +76,9 @@ class User(Base):
     chat_session         = relationship("ChatSession",      back_populates="user", uselist=False)
     notifications        = relationship("Notification",     back_populates="user", cascade="all, delete-orphan")
     zakat_calculations   = relationship("ZakatCalculation", back_populates="user", cascade="all, delete-orphan")
+    zakat_settings       = relationship("UserZakatSettings",  back_populates="user", uselist=False, cascade="all, delete-orphan")
+    wealth_profile       = relationship("WealthProfile",       back_populates="user", uselist=False, cascade="all, delete-orphan")
+    hawl_tracking        = relationship("HawlTracking",         back_populates="user", uselist=False, cascade="all, delete-orphan")
     fraud_flags          = relationship("FraudFlag",        back_populates="user",         foreign_keys="FraudFlag.user_id")
     admin_actions_done   = relationship("AdminAction",      back_populates="admin",        foreign_keys="AdminAction.admin_id")
 

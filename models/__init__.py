@@ -10,6 +10,7 @@ from models.social      import TrustedCircle, BillSplit, SplitParticipant
 from models.ai          import AiInsight, ChatSession
 from models.bank        import BankAccount
 from models.other       import Notification, PendingRegistration, OtpCode, FraudFlag, AdminAction, ZakatCalculation
+from models.zakat       import UserZakatSettings, WealthProfile, HawlTracking, MetalRateCache
 
 __all__ = [
     "User", "DeviceRegistry", "RefreshToken", "LoginAudit",
@@ -24,4 +25,5 @@ __all__ = [
     "AiInsight", "ChatSession",
     "BankAccount",
     "Notification", "PendingRegistration", "OtpCode", "FraudFlag", "AdminAction", "ZakatCalculation",
+    "UserZakatSettings", "WealthProfile", "HawlTracking", "MetalRateCache",
 ]
