@@ -50,9 +50,9 @@ class Settings(BaseSettings):
     FIREBASE_CREDENTIALS_BASE64: Optional[str] = None
 
     # ── APP CONFIG ────────────────────────────────────────────────────────────
-    ENVIRONMENT: str = "development"
+    ENVIRONMENT: str = "production"
     ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
-    DEV_MODE: bool = True
+    DEV_MODE: bool = False
     PORT: int = 8000                      # Railway sets this automatically
 
     # ── VALIDATORS ────────────────────────────────────────────────────────────
