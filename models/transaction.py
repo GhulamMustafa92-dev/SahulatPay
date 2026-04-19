@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, String, Boolean, Numeric, Text,
+    Column, String, Boolean, Integer, Numeric, Text,
     DateTime, ForeignKey, CheckConstraint, Index,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -41,8 +41,15 @@ class Transaction(Base):
     flagged_at       = Column(DateTime(timezone=True))
     tx_metadata      = Column(JSONB, server_default="{}")
     # {card_id, last_four, merchant_name, card_network, provider_ref, ...}
-    completed_at     = Column(DateTime(timezone=True))
-    created_at       = Column(DateTime(timezone=True), server_default=func.now())
+    hold_reason              = Column(Text, nullable=True)
+    held_at                  = Column(DateTime(timezone=True), nullable=True)
+    hold_expires_at          = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by              = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    deepseek_score           = Column(Integer, nullable=True)
+    deepseek_recommendation  = Column(String(20), nullable=True)
+    fraud_score              = Column(Integer, server_default="0")
+    completed_at             = Column(DateTime(timezone=True))
+    created_at               = Column(DateTime(timezone=True), server_default=func.now())
 
     sender    = relationship("User", back_populates="transactions_sent",     foreign_keys=[sender_id])
     recipient = relationship("User", back_populates="transactions_received",  foreign_keys=[recipient_id])

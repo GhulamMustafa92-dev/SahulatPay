@@ -48,6 +48,10 @@ async def lifespan(app: FastAPI):
     from scheduler.hawl_scheduler import start_hawl_scheduler, stop_hawl_scheduler
     start_hawl_scheduler()
 
+    # Fraud detection — 15-min scanner + 02:00 UTC daily deep analysis
+    from scheduler.fraud_scheduler import start_fraud_scheduler, stop_fraud_scheduler
+    start_fraud_scheduler()
+
     yield
 
     # ── Shutdown ──
@@ -56,6 +60,7 @@ async def lifespan(app: FastAPI):
     stop_card_scheduler()
     stop_metal_rate_scheduler()
     stop_hawl_scheduler()
+    stop_fraud_scheduler()
     print("[shutdown] server stopping")
 
 

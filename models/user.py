@@ -79,8 +79,12 @@ class User(Base):
     zakat_settings       = relationship("UserZakatSettings",  back_populates="user", uselist=False, cascade="all, delete-orphan")
     wealth_profile       = relationship("WealthProfile",       back_populates="user", uselist=False, cascade="all, delete-orphan")
     hawl_tracking        = relationship("HawlTracking",         back_populates="user", uselist=False, cascade="all, delete-orphan")
-    fraud_flags          = relationship("FraudFlag",        back_populates="user",         foreign_keys="FraudFlag.user_id")
-    admin_actions_done   = relationship("AdminAction",      back_populates="admin",        foreign_keys="AdminAction.admin_id")
+    fraud_flags          = relationship("FraudFlag",             back_populates="user",         foreign_keys="FraudFlag.user_id")
+    admin_actions_done   = relationship("AdminAction",           back_populates="admin",        foreign_keys="AdminAction.admin_id")
+    behaviour_profile    = relationship("UserBehaviourProfile",  back_populates="user",         uselist=False, cascade="all, delete-orphan")
+    wallet_debts         = relationship("WalletDebt",            back_populates="user",         cascade="all, delete-orphan")
+    disputes             = relationship("TransactionDispute",     back_populates="user",         foreign_keys="TransactionDispute.user_id", cascade="all, delete-orphan")
+    str_reports          = relationship("StrReport",             back_populates="user",         foreign_keys="StrReport.user_id",          cascade="all, delete-orphan")
 
 
 class DeviceRegistry(Base):

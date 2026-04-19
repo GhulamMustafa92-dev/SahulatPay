@@ -16,6 +16,7 @@ from models.ai import AiInsight, ChatSession
 from models.card import VirtualCard
 from models.finance import HighYieldDeposit, InsurancePolicy, Investment
 from models.kyc import BusinessProfile, Document
+from models.fraud import StrReport, WalletDebt
 from models.other import AdminAction, FraudFlag, Notification, ZakatCalculation
 from models.rewards import OfferTemplate, RewardOffer
 from models.savings import SavingGoal
@@ -345,8 +346,10 @@ async def flag_transaction(txn_id: UUID, body: FlagTxnRequest, admin: User = Dep
 
 @router.post("/transactions/{txn_id}/reverse")
 async def reverse_transaction(txn_id: UUID, body: UserActionRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    """Reverse a completed transaction. SELECT FOR UPDATE prevents double-reversal."""
-    # SELECT FOR UPDATE — prevents concurrent reversal
+    """Reverse a completed transaction. SELECT FOR UPDATE prevents double-reversal.
+    Partial reversal if recipient has insufficient balance — creates WalletDebt for shortfall.
+    Wallet balance will NEVER go negative.
+    """
     txn = (await db.execute(
         select(Transaction).where(Transaction.id == txn_id).with_for_update()
     )).scalar_one_or_none()
@@ -354,26 +357,57 @@ async def reverse_transaction(txn_id: UUID, body: UserActionRequest, admin: User
         raise HTTPException(404, "Transaction not found.")
     if txn.status == "reversed":
         raise HTTPException(409, "Transaction already reversed.")
-    if txn.status != "completed":
+    if txn.status not in ("completed", "under_review"):
         raise HTTPException(400, f"Cannot reverse a transaction with status '{txn.status}'.")
 
     txn.status = "reversed"
+    is_partial  = False
+    shortfall   = Decimal("0")
 
-    # Refund sender
-    if txn.sender_id:
-        sender_wallet = (await db.execute(select(Wallet).where(Wallet.user_id == txn.sender_id))).scalar_one_or_none()
-        if sender_wallet:
-            sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + txn.amount
-
-    # Deduct from recipient
+    recv_wallet = None
     if txn.recipient_id:
-        recv_wallet = (await db.execute(select(Wallet).where(Wallet.user_id == txn.recipient_id))).scalar_one_or_none()
-        if recv_wallet and recv_wallet.balance >= txn.amount:
-            recv_wallet.balance -= txn.amount
+        recv_wallet = (await db.execute(
+            select(Wallet).where(Wallet.user_id == txn.recipient_id).with_for_update()
+        )).scalar_one_or_none()
+
+    sender_wallet = None
+    if txn.sender_id:
+        sender_wallet = (await db.execute(
+            select(Wallet).where(Wallet.user_id == txn.sender_id).with_for_update()
+        )).scalar_one_or_none()
+
+    if recv_wallet is not None:
+        recv_balance = recv_wallet.balance or Decimal("0")
+        if recv_balance >= txn.amount:
+            recv_wallet.balance  = recv_balance - txn.amount
+            if sender_wallet:
+                sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + txn.amount
+        else:
+            available  = recv_balance
+            shortfall  = txn.amount - available
+            is_partial = True
+            recv_wallet.balance = Decimal("0")
+            if sender_wallet:
+                sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + available
+            db.add(WalletDebt(
+                user_id=txn.recipient_id,
+                amount_pkr=shortfall,
+                reason="fraud_reversal",
+                source_transaction_id=txn.id,
+                due_at=_utcnow() + timedelta(days=30),
+            ))
+    elif sender_wallet:
+        sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + txn.amount
 
     await db.commit()
     await log_admin_action(db, admin.id, "reverse_transaction", txn_id, "transaction", body.reason)
-    return {"message": "Transaction reversed and sender refunded.", "txn_id": txn_id}
+    msg = (
+        f"Partial reversal. PKR {float(available):,.2f} refunded to sender. "
+        f"WalletDebt of PKR {float(shortfall):,.2f} created for recipient (due in 30 days)."
+        if is_partial else
+        "Transaction fully reversed and sender refunded."
+    )
+    return {"message": msg, "txn_id": txn_id, "partial": is_partial, "shortfall": float(shortfall)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -411,9 +445,32 @@ async def resolve_fraud(flag_id: UUID, body: ResolveFraudRequest, admin: User = 
     flag.resolved_by     = admin.id
     flag.resolved_at     = _utcnow()
     flag.resolution_note = body.resolution_note
+
+    txn_completed = False
+    if flag.transaction_id:
+        txn = (await db.execute(
+            select(Transaction).where(Transaction.id == flag.transaction_id)
+        )).scalar_one_or_none()
+        if txn and txn.status == "under_review":
+            hold_still_valid = txn.hold_expires_at and txn.hold_expires_at > _utcnow()
+            if hold_still_valid:
+                txn.status       = "completed"
+                txn.completed_at = _utcnow()
+                txn.reviewed_by  = admin.id
+                if txn.recipient_id:
+                    recv_wallet = (await db.execute(
+                        select(Wallet).where(Wallet.user_id == txn.recipient_id)
+                    )).scalar_one_or_none()
+                    if recv_wallet:
+                        recv_wallet.balance = (recv_wallet.balance or Decimal("0")) + txn.amount
+                txn_completed = True
+
     await db.commit()
     await log_admin_action(db, admin.id, "resolve_fraud", flag.user_id, "user", body.resolution_note, {"flag_id": str(flag_id)})
-    return {"message": "Fraud alert resolved.", "flag_id": flag_id}
+    msg = "Fraud alert resolved."
+    if txn_completed:
+        msg += " Held transaction completed and recipient credited."
+    return {"message": msg, "flag_id": flag_id, "transaction_completed": txn_completed}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -761,6 +818,153 @@ async def zakat_stats(admin: User = Depends(require_admin), db: AsyncSession = D
         "unpaid_count":       total_calcs - paid_count,
         "total_zakat_paid_pkr": float(total_paid),
     }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FRAUD FEED — live auto-flagged transactions
+# ══════════════════════════════════════════════════════════════════════════════
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+@router.get("/fraud-feed")
+async def fraud_feed(
+    severity: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 25,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Auto-flagged transactions from last 24 hours, sorted by severity."""
+    from datetime import timedelta
+    cutoff = _utcnow() - timedelta(hours=24)
+    q = (
+        select(FraudFlag)
+        .where(FraudFlag.is_resolved == False, FraudFlag.created_at >= cutoff)
+    )
+    if severity:
+        allowed = [s.strip() for s in severity.split(",")]
+        q = q.where(FraudFlag.severity.in_(allowed))
+
+    flags = (await db.execute(
+        q.order_by(FraudFlag.created_at.desc()).offset((page - 1) * per_page).limit(per_page)
+    )).scalars().all()
+
+    rows = []
+    for f in flags:
+        txn = None
+        user_risk = None
+        if f.transaction_id:
+            txn = (await db.execute(
+                select(Transaction).where(Transaction.id == f.transaction_id)
+            )).scalar_one_or_none()
+        if f.user_id:
+            u = (await db.execute(select(User).where(User.id == f.user_id))).scalar_one_or_none()
+            if u:
+                user_risk = u.risk_score
+        rows.append({
+            "flag_id":              f.id,
+            "user_id":             f.user_id,
+            "user_risk_score":     user_risk,
+            "transaction_id":      f.transaction_id,
+            "amount":              float(txn.amount) if txn else None,
+            "fraud_score":         txn.fraud_score   if txn else None,
+            "deepseek_score":      txn.deepseek_score if txn else None,
+            "deepseek_recommendation": txn.deepseek_recommendation if txn else None,
+            "txn_status":          txn.status        if txn else None,
+            "hold_expires_at":     txn.hold_expires_at.isoformat() if txn and txn.hold_expires_at else None,
+            "severity":            f.severity,
+            "reason":              f.reason,
+            "created_at":          f.created_at.isoformat() if f.created_at else None,
+        })
+
+    rows.sort(key=lambda r: _SEVERITY_ORDER.get(r["severity"], 9))
+    return {"feed": rows, "count": len(rows), "page": page}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STR REPORTS — Suspicious Transaction Reports
+# ══════════════════════════════════════════════════════════════════════════════
+@router.get("/str-reports")
+async def list_str_reports(
+    status: Optional[str] = None,
+    page: int = 1,
+    per_page: int = 20,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(StrReport)
+    if status:
+        q = q.where(StrReport.status == status)
+    reports = (await db.execute(
+        q.order_by(desc(StrReport.generated_at)).offset((page - 1) * per_page).limit(per_page)
+    )).scalars().all()
+    total = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
+    return {
+        "reports": [
+            {
+                "id":             r.id,
+                "user_id":        r.user_id,
+                "transaction_id": r.transaction_id,
+                "report_type":    r.report_type,
+                "amount_pkr":     float(r.amount_pkr),
+                "status":         r.status,
+                "generated_at":   r.generated_at.isoformat() if r.generated_at else None,
+                "reviewed_by":    r.reviewed_by,
+                "submitted_at":   r.submitted_at.isoformat() if r.submitted_at else None,
+                "submission_ref": r.submission_ref,
+            }
+            for r in reports
+        ],
+        "total": total, "page": page,
+    }
+
+
+class StrReviewRequest(BaseModel):
+    narrative: str = Field(..., min_length=20)
+
+
+@router.post("/str-reports/{report_id}/review")
+async def review_str_report(
+    report_id: UUID,
+    body: StrReviewRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    report = (await db.execute(select(StrReport).where(StrReport.id == report_id))).scalar_one_or_none()
+    if not report:
+        raise HTTPException(404, "STR report not found.")
+    if report.status == "submitted":
+        raise HTTPException(409, "Cannot edit a submitted report.")
+    report.ai_narrative = body.narrative
+    report.status       = "reviewed"
+    report.reviewed_by  = admin.id
+    await db.commit()
+    await log_admin_action(db, admin.id, "str_review", report.user_id, "user", "STR narrative reviewed", {"report_id": str(report_id)})
+    return {"message": "STR report reviewed.", "report_id": report_id}
+
+
+class StrSubmitRequest(BaseModel):
+    submission_ref: str = Field(..., min_length=3)
+
+
+@router.post("/str-reports/{report_id}/submit")
+async def submit_str_report(
+    report_id: UUID,
+    body: StrSubmitRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    report = (await db.execute(select(StrReport).where(StrReport.id == report_id))).scalar_one_or_none()
+    if not report:
+        raise HTTPException(404, "STR report not found.")
+    if report.status == "submitted":
+        raise HTTPException(409, "Report already submitted.")
+    report.status         = "submitted"
+    report.submitted_at   = _utcnow()
+    report.submission_ref = body.submission_ref
+    await db.commit()
+    await log_admin_action(db, admin.id, "str_submit", report.user_id, "user", f"STR submitted: {body.submission_ref}", {"report_id": str(report_id)})
+    return {"message": "STR report marked as submitted.", "report_id": report_id, "submission_ref": body.submission_ref}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

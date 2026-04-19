@@ -24,6 +24,7 @@ import models.social
 import models.ai
 import models.bank
 import models.other
+import models.fraud
 
 config = context.config
 

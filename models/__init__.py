@@ -11,6 +11,7 @@ from models.ai          import AiInsight, ChatSession
 from models.bank        import BankAccount
 from models.other       import Notification, PendingRegistration, OtpCode, FraudFlag, AdminAction, ZakatCalculation
 from models.zakat       import UserZakatSettings, WealthProfile, HawlTracking, MetalRateCache
+from models.fraud       import UserBehaviourProfile, WalletDebt, TransactionDispute, StrReport
 
 __all__ = [
     "User", "DeviceRegistry", "RefreshToken", "LoginAudit",
@@ -26,4 +27,5 @@ __all__ = [
     "BankAccount",
     "Notification", "PendingRegistration", "OtpCode", "FraudFlag", "AdminAction", "ZakatCalculation",
     "UserZakatSettings", "WealthProfile", "HawlTracking", "MetalRateCache",
+    "UserBehaviourProfile", "WalletDebt", "TransactionDispute", "StrReport",
 ]

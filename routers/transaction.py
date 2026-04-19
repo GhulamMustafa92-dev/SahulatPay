@@ -7,15 +7,19 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select, desc, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from limiter import limiter
+from models.fraud import TransactionDispute
+from models.other import FraudFlag
 from models.user import User
 from models.wallet import Wallet
 from models.transaction import Transaction
 from services.auth_service import get_current_user, normalize_phone
+from services.notification_service import send_notification
 from services.wallet_service import doTransfer, decode_pending_tx_token, generate_reference, TIER_LIMITS
 from schemas.transaction import (
     SendRequest, SendResponse,
@@ -85,6 +89,15 @@ async def send_p2p(
         return SendResponse(status="pending_biometric",
                             message="Amount ≥ PKR 1,000. Biometric confirmation required.",
                             pending_tx_token=result["pending_tx_token"])
+    if result["status"] == "under_review":
+        return SendResponse(
+            status="under_review",
+            message=result.get("message", "Transaction is under review."),
+            reference_number=result["reference_number"],
+            transaction_id=result["transaction_id"],
+            cashback_earned=result["cashback_earned"],
+            new_balance=result["new_balance"],
+        )
     return SendResponse(
         status="completed",
         message=f"PKR {body.amount:,.2f} sent to {_mask_name(recipient.full_name)}",
@@ -127,6 +140,15 @@ async def confirm_biometric(
         card_id=UUID(payload["card_id"]) if payload.get("card_id") else None,
         biometric_confirmed=True,
     )
+    if result["status"] == "under_review":
+        return SendResponse(
+            status="under_review",
+            message=result.get("message", "Transaction is under review."),
+            reference_number=result["reference_number"],
+            transaction_id=result["transaction_id"],
+            cashback_earned=result["cashback_earned"],
+            new_balance=result["new_balance"],
+        )
     return SendResponse(
         status="completed",
         message=f"PKR {payload['amount']} sent (biometric confirmed)",
@@ -178,6 +200,15 @@ async def send_qr(
         return SendResponse(status="pending_biometric",
                             message="Amount ≥ PKR 1,000. Biometric confirmation required.",
                             pending_tx_token=result["pending_tx_token"])
+    if result["status"] == "under_review":
+        return SendResponse(
+            status="under_review",
+            message=result.get("message", "Transaction is under review."),
+            reference_number=result["reference_number"],
+            transaction_id=result["transaction_id"],
+            cashback_earned=result["cashback_earned"],
+            new_balance=result["new_balance"],
+        )
     return SendResponse(
         status="completed",
         message=f"QR payment of PKR {amount:,.2f} sent to {_mask_name(recipient.full_name)}",
@@ -352,6 +383,82 @@ async def transaction_history(
         items=items, total=total, page=page, per_page=per_page,
         has_next=(page * per_page) < total,
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /transactions/{txn_id}/dispute
+# ══════════════════════════════════════════════════════════════════════════════
+class DisputeRequest(BaseModel):
+    dispute_type: str = Field(..., pattern="^(unauthorized|wrong_amount|wrong_recipient|other)$")
+    reason: str = Field(..., min_length=10)
+
+
+@router.post("/{txn_id}/dispute", status_code=201)
+@limiter.limit("3/day")
+async def file_dispute(
+    request: Request,
+    txn_id: UUID,
+    body: DisputeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """User reports a suspicious/unauthorized transaction. Rate-limited to 3 per day."""
+    txn = (await db.execute(select(Transaction).where(Transaction.id == txn_id))).scalar_one_or_none()
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    if txn.sender_id != current_user.id and txn.recipient_id != current_user.id:
+        raise HTTPException(403, "Transaction does not belong to you")
+
+    existing = (await db.execute(
+        select(TransactionDispute).where(TransactionDispute.transaction_id == txn_id)
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, "A dispute already exists for this transaction")
+
+    dispute = TransactionDispute(
+        user_id=current_user.id,
+        transaction_id=txn_id,
+        dispute_type=body.dispute_type,
+        reason=body.reason,
+        status="open",
+    )
+    db.add(dispute)
+
+    txn.is_flagged  = True
+    txn.flag_reason = f"user_dispute: {body.dispute_type}"
+    txn.flagged_at  = _utcnow()
+    txn.flagged_by  = current_user.id
+
+    db.add(FraudFlag(
+        user_id=current_user.id,
+        transaction_id=txn_id,
+        reason=f"user_reported_dispute: {body.dispute_type} — {body.reason[:200]}",
+        severity="high",
+    ))
+
+    await db.commit()
+    await db.refresh(dispute)
+
+    await send_notification(
+        db, current_user.id,
+        "Dispute Registered",
+        "Your dispute has been registered. We will respond within 24 hours.",
+        "security",
+        {"dispute_id": str(dispute.id), "transaction_id": str(txn_id)},
+    )
+
+    from services.fraud_scoring import schedule_admin_notify
+    schedule_admin_notify(
+        "🚩 User Dispute Filed",
+        f"User {current_user.phone_number} disputed PKR {float(txn.amount):,.0f} — {body.dispute_type}",
+        {"dispute_id": str(dispute.id), "txn_id": str(txn_id)},
+    )
+
+    return {
+        "dispute_id": dispute.id,
+        "status":     "open",
+        "message":    "Dispute registered. We will review and respond within 24 hours.",
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from models.other import FraudFlag
 from models.user import User
 from models.wallet import Wallet
 from models.transaction import Transaction
@@ -81,6 +82,7 @@ async def _execute_transfer(
     purpose: str,
     description: Optional[str],
     card_id: Optional[UUID],
+    fraud_score: int = 0,
 ) -> dict:
     """
     Atomic debit/credit. Caller must have already locked wallets with SELECT FOR UPDATE.
@@ -116,6 +118,7 @@ async def _execute_transfer(
         description=description,
         completed_at=_utcnow(),
         tx_metadata={"card_id": str(card_id)} if card_id else {},
+        fraud_score=fraud_score,
     )
     recipient_txn = Transaction(
         reference_number=ref + "R",
@@ -254,6 +257,76 @@ async def doTransfer(
             f"Insufficient balance. Available: PKR {sender_wallet.balance:,.2f}",
         )
 
+    # ── Velocity check — runs before biometric redirect ───────────────────────
+    from services.fraud_scoring import (
+        check_velocity, calculate_fraud_score,
+        score_to_severity, schedule_admin_notify,
+    )
+    velocity_status, velocity_reason = await check_velocity(sender_id, db)
+
+    if velocity_status == "blocked":
+        sender.is_locked  = True
+        sender.is_active  = False
+        sender.is_flagged = True
+        ref = generate_reference()
+        blocked_txn = Transaction(
+            reference_number=ref, type="send", amount=amount,
+            fee=Decimal("0"), cashback_earned=Decimal("0"),
+            status="blocked", sender_id=sender_id,
+            recipient_id=recipient_id, purpose=purpose,
+            description=description, fraud_score=100,
+            is_flagged=True, flag_reason=velocity_reason,
+            hold_reason=velocity_reason,
+        )
+        db.add(blocked_txn)
+        db.add(FraudFlag(
+            user_id=sender_id, transaction_id=blocked_txn.id,
+            reason=f"VELOCITY: {velocity_reason}", severity="critical",
+        ))
+        await db.commit()
+        schedule_admin_notify(
+            "🚨 CRITICAL VELOCITY FRAUD",
+            f"User {sender.phone_number} auto-locked — {velocity_reason}",
+            {"user_id": str(sender_id), "ref": ref},
+        )
+        raise HTTPException(403, "Transaction blocked — suspicious activity detected. Account locked for review.")
+
+    if velocity_status == "hold":
+        sender_wallet.balance    -= amount
+        sender_wallet.daily_spent = (sender_wallet.daily_spent or Decimal("0")) + amount
+        ref = generate_reference()
+        held_txn = Transaction(
+            reference_number=ref, type="send", amount=amount,
+            fee=Decimal("0"), cashback_earned=Decimal("0"),
+            status="under_review", sender_id=sender_id,
+            recipient_id=recipient_id, purpose=purpose,
+            description=description, fraud_score=60,
+            is_flagged=True, flag_reason=velocity_reason,
+            held_at=_utcnow(),
+            hold_expires_at=_utcnow() + timedelta(hours=2),
+            hold_reason=velocity_reason,
+        )
+        db.add(held_txn)
+        db.add(FraudFlag(
+            user_id=sender_id, transaction_id=held_txn.id,
+            reason=f"VELOCITY: {velocity_reason}", severity="high",
+        ))
+        await db.commit()
+        await db.refresh(held_txn)
+        schedule_admin_notify(
+            "⚠️ HIGH VELOCITY — Transaction Held",
+            f"PKR {amount:,.0f} held (2h). User {sender.phone_number} — {velocity_reason}",
+            {"user_id": str(sender_id), "ref": ref},
+        )
+        return {
+            "status":           "under_review",
+            "reference_number": ref,
+            "transaction_id":   held_txn.id,
+            "message":          f"Transaction held for review — {velocity_reason}",
+            "cashback_earned":  Decimal("0"),
+            "new_balance":      sender_wallet.balance,
+        }
+
     # ── Large transfer — return pending token for biometric confirm ────────────
     if amount >= Decimal("1000") and not biometric_confirmed:
         payload = {
@@ -266,8 +339,77 @@ async def doTransfer(
         }
         return {"status": "pending_biometric", "pending_tx_token": create_pending_tx_token(payload)}
 
-    # ── Execute ───────────────────────────────────────────────────────────────
-    return await _execute_transfer(
+    # ── Rule-based fraud scoring ───────────────────────────────────────────────
+    score, reasons = await calculate_fraud_score(sender, amount, recipient_id, db)
+    reason_text    = ", ".join(reasons) if reasons else "automated_scoring"
+
+    if score >= 81:
+        sender.is_locked  = True
+        sender.is_active  = False
+        sender.is_flagged = True
+        sender.risk_score = min(score, 32767)
+        ref = generate_reference()
+        blocked_txn = Transaction(
+            reference_number=ref, type="send", amount=amount,
+            fee=Decimal("0"), cashback_earned=Decimal("0"),
+            status="blocked", sender_id=sender_id,
+            recipient_id=recipient_id, purpose=purpose,
+            description=description, fraud_score=score,
+            is_flagged=True, flag_reason=reason_text,
+            hold_reason=reason_text,
+        )
+        db.add(blocked_txn)
+        db.add(FraudFlag(
+            user_id=sender_id, transaction_id=blocked_txn.id,
+            reason=f"AUTO: {reason_text}", severity="critical",
+        ))
+        await db.commit()
+        schedule_admin_notify(
+            "🚨 CRITICAL FRAUD — Account Auto-Locked",
+            f"User {sender.phone_number} locked. Score {score}. {reason_text}",
+            {"user_id": str(sender_id), "score": str(score), "ref": ref},
+        )
+        raise HTTPException(403, "Transaction blocked due to fraud risk. Account locked for review.")
+
+    if score >= 51:
+        sender_wallet.balance    -= amount
+        sender_wallet.daily_spent = (sender_wallet.daily_spent or Decimal("0")) + amount
+        sender.risk_score = min(score, 32767)
+        ref = generate_reference()
+        held_txn = Transaction(
+            reference_number=ref, type="send", amount=amount,
+            fee=Decimal("0"), cashback_earned=Decimal("0"),
+            status="under_review", sender_id=sender_id,
+            recipient_id=recipient_id, purpose=purpose,
+            description=description, fraud_score=score,
+            is_flagged=True, flag_reason=reason_text,
+            held_at=_utcnow(),
+            hold_expires_at=_utcnow() + timedelta(hours=2),
+            hold_reason=reason_text,
+        )
+        db.add(held_txn)
+        db.add(FraudFlag(
+            user_id=sender_id, transaction_id=held_txn.id,
+            reason=f"AUTO: {reason_text}", severity="high",
+        ))
+        await db.commit()
+        await db.refresh(held_txn)
+        schedule_admin_notify(
+            "⚠️ HIGH FRAUD — Transaction Held (2h)",
+            f"PKR {amount:,.0f} held. User {sender.phone_number}. Score {score}. {reason_text}",
+            {"user_id": str(sender_id), "score": str(score), "ref": ref},
+        )
+        return {
+            "status":           "under_review",
+            "reference_number": ref,
+            "transaction_id":   held_txn.id,
+            "message":          f"Transaction under review — {reason_text}",
+            "cashback_earned":  Decimal("0"),
+            "new_balance":      sender_wallet.balance,
+        }
+
+    # ── Execute normally (score 0-50) ─────────────────────────────────────────
+    result = await _execute_transfer(
         db=db,
         sender_wallet=sender_wallet,
         recipient_wallet=recipient_wallet,
@@ -277,4 +419,67 @@ async def doTransfer(
         purpose=purpose,
         description=description,
         card_id=card_id,
+        fraud_score=score,
     )
+
+    # ── Medium risk — flag but let complete ────────────────────────────────────
+    if score >= 31:
+        sender.risk_score = min(score, 32767)
+        db.add(FraudFlag(
+            user_id=sender_id,
+            transaction_id=result["transaction_id"],
+            reason=f"AUTO: {reason_text}",
+            severity="medium",
+        ))
+        await db.commit()
+        schedule_admin_notify(
+            "🔶 MEDIUM FRAUD ALERT",
+            f"PKR {amount:,.0f} completed with medium risk. User {sender.phone_number}. Score {score}.",
+            {"user_id": str(sender_id), "score": str(score)},
+        )
+    elif score > 0:
+        sender.risk_score = min(score, 32767)
+        await db.commit()
+
+    # ── DeepSeek analysis ─────────────────────────────────────────────────────
+    try:
+        from services.fraud_scoring import get_behaviour_profile
+        from services.deepseek_fraud import fire_deepseek_async, analyse_transaction_sync
+        from models.transaction import Transaction as TxnModel
+        from sqlalchemy import update as sa_update
+        from uuid import UUID as _UUID
+
+        async def _load_txn_stub():
+            """Minimal stub so DeepSeek gets transaction data without a live session."""
+            class _Stub:
+                id             = result["transaction_id"]
+                amount         = amount
+                type           = "send"
+                reference_number = result["reference_number"]
+                created_at     = _utcnow()
+                recipient_id   = recipient_id
+                status         = "completed"
+            return _Stub()
+
+        profile  = await get_behaviour_profile(sender_id, db)
+        txn_stub = await _load_txn_stub()
+
+        if amount >= Decimal("100000"):
+            ds_result = await analyse_transaction_sync(sender, txn_stub, profile)
+            if ds_result:
+                async with db.begin_nested():
+                    await db.execute(
+                        sa_update(TxnModel)
+                        .where(TxnModel.id == result["transaction_id"])
+                        .values(
+                            deepseek_score=ds_result.get("anomaly_score"),
+                            deepseek_recommendation=ds_result.get("recommendation"),
+                        )
+                    )
+                await db.commit()
+        else:
+            fire_deepseek_async(sender, txn_stub, profile)
+    except Exception as _ds_err:
+        print(f"[wallet_service] deepseek error (non-fatal): {_ds_err}")
+
+    return result
