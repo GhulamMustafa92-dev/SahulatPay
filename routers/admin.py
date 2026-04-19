@@ -345,112 +345,6 @@ async def flag_transaction(txn_id: UUID, body: FlagTxnRequest, admin: User = Dep
     return {"message": "Transaction flagged.", "txn_id": txn_id}
 
 
-@router.post("/transactions/{txn_id}/reverse")
-async def reverse_transaction(txn_id: UUID, body: UserActionRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    """Reverse a completed transaction. SELECT FOR UPDATE prevents double-reversal.
-    Partial reversal if recipient has insufficient balance — creates WalletDebt for shortfall.
-    Wallet balance will NEVER go negative.
-    """
-    txn = (await db.execute(
-        select(Transaction).where(Transaction.id == txn_id).with_for_update()
-    )).scalar_one_or_none()
-    if not txn:
-        raise HTTPException(404, "Transaction not found.")
-    if txn.status == "reversed":
-        raise HTTPException(409, "Transaction already reversed.")
-    if txn.status not in ("completed", "under_review"):
-        raise HTTPException(400, f"Cannot reverse a transaction with status '{txn.status}'.")
-
-    txn.status = "reversed"
-    is_partial  = False
-    shortfall   = Decimal("0")
-
-    recv_wallet = None
-    if txn.recipient_id:
-        recv_wallet = (await db.execute(
-            select(Wallet).where(Wallet.user_id == txn.recipient_id).with_for_update()
-        )).scalar_one_or_none()
-
-    sender_wallet = None
-    if txn.sender_id:
-        sender_wallet = (await db.execute(
-            select(Wallet).where(Wallet.user_id == txn.sender_id).with_for_update()
-        )).scalar_one_or_none()
-
-    if recv_wallet is not None:
-        recv_balance = recv_wallet.balance or Decimal("0")
-        if recv_balance >= txn.amount:
-            recv_wallet.balance  = recv_balance - txn.amount
-            if sender_wallet:
-                sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + txn.amount
-        else:
-            available  = recv_balance
-            shortfall  = txn.amount - available
-            is_partial = True
-            recv_wallet.balance = Decimal("0")
-            if sender_wallet:
-                sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + available
-            db.add(WalletDebt(
-                user_id=txn.recipient_id,
-                amount_pkr=shortfall,
-                reason="fraud_reversal",
-                source_transaction_id=txn.id,
-                due_at=_utcnow() + timedelta(days=30),
-            ))
-    elif sender_wallet:
-        sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + txn.amount
-
-    # ── Mark reviewed_by on the transaction ───────────────────────────────────
-    txn.reviewed_by = admin.id
-
-    # ── Auto-resolve linked FraudFlag (confirms fraud) ────────────────────────
-    linked_flag = (await db.execute(
-        select(FraudFlag)
-        .where(FraudFlag.transaction_id == txn_id, FraudFlag.is_resolved == False)
-        .order_by(desc(FraudFlag.created_at))
-        .limit(1)
-    )).scalar_one_or_none()
-    if linked_flag:
-        linked_flag.is_resolved     = True
-        linked_flag.resolved_by     = admin.id
-        linked_flag.resolved_at     = _utcnow()
-        linked_flag.resolution_note = f"Transaction reversed by admin. Reason: {body.reason}"
-
-    # ── Auto-resolve linked TransactionDispute (if any) ───────────────────────
-    from models.fraud import TransactionDispute
-    linked_dispute = (await db.execute(
-        select(TransactionDispute)
-        .where(TransactionDispute.transaction_id == txn_id,
-               TransactionDispute.status.in_(["open", "under_review"]))
-    )).scalar_one_or_none()
-    if linked_dispute:
-        linked_dispute.status          = "resolved"
-        linked_dispute.resolved_at     = _utcnow()
-        linked_dispute.resolved_by     = admin.id
-        linked_dispute.resolution_note = f"Transaction reversed. Refund issued. Reason: {body.reason}"
-
-    await db.commit()
-    await log_admin_action(db, admin.id, "reverse_transaction", txn_id, "transaction", body.reason)
-
-    # ── Notify sender about refund ────────────────────────────────────────────
-    if txn.sender_id:
-        refunded_amount = float(txn.amount) if not is_partial else float(available)
-        await send_notification(
-            db, txn.sender_id,
-            "Transaction Reversed — Refund Issued",
-            f"PKR {refunded_amount:,.2f} has been refunded to your wallet following a transaction review.",
-            "security",
-            {"transaction_id": str(txn_id), "refund_amount": str(refunded_amount)},
-        )
-
-    msg = (
-        f"Partial reversal. PKR {float(available):,.2f} refunded to sender. "
-        f"WalletDebt of PKR {float(shortfall):,.2f} created for recipient (due in 30 days)."
-        if is_partial else
-        "Transaction fully reversed and sender refunded."
-    )
-    return {"message": msg, "txn_id": txn_id, "partial": is_partial, "shortfall": float(shortfall)}
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FRAUD ALERTS
@@ -1066,16 +960,26 @@ async def request_reversal(
     txn = (await db.execute(select(Transaction).where(Transaction.id == txn_id))).scalar_one_or_none()
     if not txn:
         raise HTTPException(404, "Transaction not found")
-    if txn.status not in ("completed",):
+
+    # STEP 2 — Status whitelist: completed + under_review (fraud-held)
+    if txn.status not in ("completed", "under_review"):
         raise HTTPException(400, f"Cannot request reversal for txn in status '{txn.status}'")
 
+    # STEP 3 — 90-day reversal window
+    if txn.created_at and (_utcnow() - txn.created_at).days > 90:
+        raise HTTPException(
+            400,
+            "Reversal window expired. Transactions older than 90 days cannot be reversed.",
+        )
+
+    # STEP 4 — Duplicate pending request guard
     existing = (await db.execute(
         select(ReversalRequest)
         .where(ReversalRequest.txn_id == txn_id,
                ReversalRequest.status == "pending")
     )).scalar_one_or_none()
     if existing:
-        raise HTTPException(409, "A pending reversal request already exists for this transaction")
+        raise HTTPException(409, "A pending reversal request already exists for this transaction.")
 
     req = ReversalRequest(
         txn_id=txn_id,
@@ -1097,6 +1001,73 @@ async def request_reversal(
     }
 
 
+# ── STEP 6: Side-effects helper (FraudFlag + Dispute resolve + sender push) ──
+async def _execute_reversal_side_effects(
+    db: AsyncSession,
+    txn: Transaction,
+    approving_admin: User,
+    refunded_amount: Decimal,
+    shortfall: Decimal,
+) -> None:
+    """Runs inside the caller's DB transaction — do NOT commit here."""
+
+    # 6a. Auto-resolve linked FraudFlag
+    linked_flag = (await db.execute(
+        select(FraudFlag)
+        .where(FraudFlag.transaction_id == txn.id, FraudFlag.is_resolved == False)
+        .order_by(desc(FraudFlag.created_at))
+        .limit(1)
+    )).scalar_one_or_none()
+    if linked_flag:
+        linked_flag.is_resolved     = True
+        linked_flag.resolved_by     = approving_admin.id
+        linked_flag.resolved_at     = _utcnow()
+        linked_flag.resolution_note = "reversal_approved"
+
+    # 6b. Auto-resolve linked TransactionDispute
+    linked_dispute = (await db.execute(
+        select(TransactionDispute)
+        .where(
+            TransactionDispute.transaction_id == txn.id,
+            TransactionDispute.status != "resolved",
+        )
+    )).scalar_one_or_none()
+    if linked_dispute:
+        linked_dispute.status          = "resolved"
+        linked_dispute.resolved_at     = _utcnow()
+        linked_dispute.resolved_by     = approving_admin.id
+        linked_dispute.resolution_note = (
+            f"Refund of PKR {refunded_amount} processed via admin reversal."
+        )
+
+    # 6c. Push notification to sender (failure must not roll back financials)
+    if txn.sender_id:
+        try:
+            if shortfall == Decimal("0"):
+                body_text = (
+                    f"PKR {float(refunded_amount):,.2f} has been refunded to your wallet "
+                    "following a transaction reversal."
+                )
+            else:
+                body_text = (
+                    f"PKR {float(refunded_amount):,.2f} has been refunded to your wallet. "
+                    f"A partial recovery of PKR {float(shortfall):,.2f} is pending from the recipient."
+                )
+            await send_notification(
+                db, txn.sender_id,
+                "Transaction Reversed — Refund Issued",
+                body_text,
+                "security",
+                {
+                    "transaction_id":  str(txn.id),
+                    "refunded_amount": str(refunded_amount),
+                    "shortfall":       str(shortfall),
+                },
+            )
+        except Exception as notify_err:
+            print(f"[reversal] sender notification failed (non-fatal): {notify_err}")
+
+
 @router.post("/reversal-requests/{req_id}/review")
 async def review_reversal_request(
     req_id: UUID,
@@ -1104,9 +1075,11 @@ async def review_reversal_request(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Checker step — a *different* admin approves or rejects the reversal request.
-    On approval the reversal is executed immediately (same logic as reverse_transaction).
-    """
+    """Checker step — a *different* admin approves or rejects the reversal request."""
+    from models.wallet import Wallet
+    from models.fraud import WalletDebt
+    from services.platform_ledger import ledger_credit, ledger_debit, make_idem_key
+
     req = (await db.execute(
         select(ReversalRequest).where(ReversalRequest.id == req_id)
     )).scalar_one_or_none()
@@ -1114,79 +1087,208 @@ async def review_reversal_request(
         raise HTTPException(404, "Reversal request not found")
     if req.status != "pending":
         raise HTTPException(400, f"Request already {req.status}")
+
+    # Step 8.1 — Maker ≠ Checker
     if req.requested_by == admin.id:
         raise HTTPException(403, "Maker and Checker must be different admins")
 
-    req.reviewed_by  = admin.id
-    req.reviewed_at  = _utcnow()
-    req.review_note  = body.review_note
-    req.status       = body.decision
-
+    # ── APPROVED path ─────────────────────────────────────────────────────────
     if body.decision == "approved":
+
+        # Step 8.2 — SELECT FOR UPDATE on txn + both wallets simultaneously
         txn = (await db.execute(
-            select(Transaction)
-            .where(Transaction.id == req.txn_id)
-            .with_for_update()
+            select(Transaction).where(Transaction.id == req.txn_id).with_for_update()
         )).scalar_one_or_none()
         if not txn:
             raise HTTPException(404, "Transaction not found")
-        if txn.status in ("reversed",):
-            raise HTTPException(400, "Transaction already reversed")
 
-        from models.wallet import Wallet
-        from models.fraud import WalletDebt, FraudFlag
-
+        sender_wallet = None
         if txn.sender_id:
             sender_wallet = (await db.execute(
                 select(Wallet).where(Wallet.user_id == txn.sender_id).with_for_update()
             )).scalar_one_or_none()
-        else:
-            sender_wallet = None
 
         recipient_wallet = None
-        available = Decimal("0")
         if txn.recipient_id:
             recipient_wallet = (await db.execute(
                 select(Wallet).where(Wallet.user_id == txn.recipient_id).with_for_update()
             )).scalar_one_or_none()
-            if recipient_wallet:
-                available = min(txn.amount, recipient_wallet.balance)
 
-        is_partial = available < txn.amount
-        shortfall  = txn.amount - available
+        # Step 8.3 — Double-reversal guard
+        if txn.status == "reversed":
+            raise HTTPException(409, "Transaction already reversed")
+
+        # Step 8.4 — Status guard
+        if txn.status not in ("completed", "under_review"):
+            raise HTTPException(
+                400,
+                f"Cannot reverse a transaction in status '{txn.status}'",
+            )
+
+        # Step 8.5 — Wallet math
+        available = Decimal("0")
+        if recipient_wallet:
+            available = min(txn.amount, recipient_wallet.balance or Decimal("0"))
+
+        is_partial      = available < txn.amount
+        shortfall       = txn.amount - available
+        refunded_amount = available
 
         if recipient_wallet and available > 0:
-            recipient_wallet.balance -= available
+            recipient_wallet.balance = (recipient_wallet.balance or Decimal("0")) - available
         if sender_wallet:
-            sender_wallet.balance += available
-
-        txn.status      = "reversed"
-        txn.reviewed_by = admin.id
+            sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + available
 
         if is_partial and txn.recipient_id:
             db.add(WalletDebt(
                 user_id=txn.recipient_id,
                 amount_pkr=shortfall,
-                reason=f"Reversal shortfall (approved by {admin.id}): {req.reason_code}",
+                reason=f"Reversal shortfall ({req.reason_code})",
                 source_transaction_id=txn.id,
                 due_at=_utcnow() + timedelta(days=30),
             ))
 
-        await db.commit()
-        await log_admin_action(db, admin.id, "approve_reversal", req.txn_id, "transaction",
-                               f"Reversal approved. Partial={is_partial}")
-        msg = (
-            f"Reversal approved and executed. "
-            f"PKR {float(available):,.2f} refunded to sender."
-            + (f" WalletDebt PKR {float(shortfall):,.2f} created." if is_partial else "")
-        )
-    else:
-        await db.commit()
-        await log_admin_action(db, admin.id, "reject_reversal", req.txn_id, "transaction",
-                               body.review_note or "")
-        msg = "Reversal request rejected."
+        # Step 8.6 — Mark transaction reversed
+        txn.status      = "reversed"
+        txn.reviewed_by = admin.id
 
-    return {"reversal_request_id": str(req_id), "decision": body.decision, "message": msg}
+        # Step 8.7 — Platform ledger entries (STEP 7)
+        if not is_partial:
+            await ledger_credit(
+                db, "main_float", txn.amount,
+                f"reversal-{req_id}-reversal_full",
+                transaction_id=txn.id,
+                note="Full reversal — funds returned to sender from recipient wallet.",
+            )
+        else:
+            await ledger_credit(
+                db, "main_float", refunded_amount,
+                f"reversal-{req_id}-reversal_partial_refund",
+                transaction_id=txn.id,
+                note="Partial reversal — available balance returned to sender.",
+            )
+            await ledger_credit(
+                db, "main_float", shortfall,
+                f"reversal-{req_id}-reversal_partial_shortfall",
+                transaction_id=txn.id,
+                note="Partial reversal — shortfall recorded as WalletDebt against recipient. Platform absorbs risk.",
+            )
+            try:
+                await ledger_debit(
+                    db, "platform_revenue", shortfall,
+                    f"reversal-{req_id}-platform_revenue_debit",
+                    transaction_id=txn.id,
+                    note=f"Platform absorbs reversal shortfall PKR {shortfall}.",
+                )
+            except ValueError:
+                print(
+                    f"[reversal] platform_revenue balance insufficient for shortfall "
+                    f"PKR {shortfall} — skipping debit (ops alert needed)"
+                )
+
+        # Step 8.8 — Side effects (FraudFlag, Dispute, push notification)
+        await _execute_reversal_side_effects(db, txn, admin, refunded_amount, shortfall)
+
+        # Step 8.9 — Stamp the ReversalRequest
+        req.status      = "approved"
+        req.reviewed_by = admin.id
+        req.reviewed_at = _utcnow()
+        req.review_note = body.review_note
+
+        # Step 8.10 — Single commit for all the above
+        await db.commit()
+
+        # Step 8.11 — Dual audit log (maker + checker)
+        await log_admin_action(
+            db, req.requested_by, "reversal_requested", req.txn_id, "transaction",
+            f"{req.reason_code}: {req.reason_detail or ''}",
+        )
+        await log_admin_action(
+            db, admin.id, "reversal_approved", req.txn_id, "transaction",
+            f"Approved reversal request {req_id}. Partial={is_partial}. "
+            f"Refunded={float(refunded_amount):,.2f}. Shortfall={float(shortfall):,.2f}.",
+        )
+
+        # Step 8.12 — Return full reversal summary
+        return {
+            "reversal_request_id": str(req_id),
+            "txn_id":              str(req.txn_id),
+            "decision":            "approved",
+            "partial":             is_partial,
+            "refunded_amount":     float(refunded_amount),
+            "shortfall":           float(shortfall),
+            "message": (
+                f"Reversal approved. PKR {float(refunded_amount):,.2f} refunded to sender."
+                + (f" WalletDebt of PKR {float(shortfall):,.2f} created for recipient." if is_partial else "")
+            ),
+        }
+
+    # ── REJECTED path ─────────────────────────────────────────────────────────
+    req.status      = "rejected"
+    req.reviewed_by = admin.id
+    req.reviewed_at = _utcnow()
+    req.review_note = body.review_note
+
+    await db.commit()
+
+    # Notify the requesting admin about the rejection
+    try:
+        await send_notification(
+            db, req.requested_by,
+            "Reversal Request Rejected",
+            f"Your reversal request for transaction {req.txn_id} was rejected. "
+            f"Reason: {body.review_note or 'No reason provided.'}",
+            "security",
+            {"reversal_request_id": str(req_id), "txn_id": str(req.txn_id)},
+        )
+    except Exception as notify_err:
+        print(f"[reversal] rejection notification failed (non-fatal): {notify_err}")
+
+    await log_admin_action(
+        db, admin.id, "reversal_rejected", req.txn_id, "transaction",
+        f"Rejected reversal request {req_id}. Note: {body.review_note or ''}",
+    )
+
+    return {
+        "reversal_request_id": str(req_id),
+        "txn_id":              str(req.txn_id),
+        "decision":            "rejected",
+        "message":             "Reversal request rejected. Requesting admin has been notified.",
+    }
+
+
+@router.get("/reversal-requests/{req_id}")
+async def get_reversal_request(
+    req_id: UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Single-item detail for a reversal request, including the linked transaction summary."""
+    req = (await db.execute(
+        select(ReversalRequest).where(ReversalRequest.id == req_id)
+    )).scalar_one_or_none()
+    if not req:
+        raise HTTPException(404, "Reversal request not found")
+
+    txn = (await db.execute(
+        select(Transaction).where(Transaction.id == req.txn_id)
+    )).scalar_one_or_none()
+
+    return {
+        "id":                str(req.id),
+        "txn_id":            str(req.txn_id),
+        "txn_amount":        float(txn.amount) if txn else None,
+        "txn_status":        txn.status if txn else None,
+        "txn_created_at":    txn.created_at.isoformat() if txn and txn.created_at else None,
+        "requested_by":      str(req.requested_by),
+        "reason_code":       req.reason_code,
+        "reason_detail":     req.reason_detail,
+        "status":            req.status,
+        "created_at":        req.created_at.isoformat(),
+        "reviewed_by":       str(req.reviewed_by) if req.reviewed_by else None,
+        "reviewed_at":       req.reviewed_at.isoformat() if req.reviewed_at else None,
+        "review_note":       req.review_note,
+    }
 
 
 @router.get("/reversal-requests")
