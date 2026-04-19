@@ -52,6 +52,14 @@ async def lifespan(app: FastAPI):
     from scheduler.fraud_scheduler import start_fraud_scheduler, stop_fraud_scheduler
     start_fraud_scheduler()
 
+    # Debt lifecycle — 15-min soft/intercept/hard escalation
+    from scheduler.debt_scheduler import start_debt_scheduler, stop_debt_scheduler
+    start_debt_scheduler()
+
+    # Daily reconciliation — 01:00 UTC balance integrity check
+    from scheduler.reconciliation_scheduler import start_reconciliation_scheduler, stop_reconciliation_scheduler
+    start_reconciliation_scheduler()
+
     yield
 
     # ── Shutdown ──
@@ -61,6 +69,8 @@ async def lifespan(app: FastAPI):
     stop_metal_rate_scheduler()
     stop_hawl_scheduler()
     stop_fraud_scheduler()
+    stop_debt_scheduler()
+    stop_reconciliation_scheduler()
     print("[shutdown] server stopping")
 
 
@@ -196,3 +206,6 @@ app.include_router(banking.router, prefix="/api/v1/banking", tags=["Banking"])
 
 from routers import admin
 app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
+
+from routers import gold
+app.include_router(gold.router, prefix="/api/v1/gold", tags=["Gold & Silver"])

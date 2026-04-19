@@ -25,6 +25,8 @@ import models.ai
 import models.bank
 import models.other
 import models.fraud
+import models.platform
+import models.gold
 
 config = context.config
 

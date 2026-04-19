@@ -24,6 +24,7 @@ from models.social import BillSplit, SplitParticipant
 from models.transaction import Transaction
 from models.user import DeviceRegistry, User
 from models.wallet import Wallet
+from models.platform import PlatformAccount, PlatformLedgerEntry
 from services.auth_service import get_current_user, hash_password
 from services.kyc_service import get_signed_url
 from services.notification_service import send_notification
@@ -1036,4 +1037,447 @@ async def ai_monitor(admin: User = Depends(require_admin), db: AsyncSession = De
         "total_insights_cached": total_insights,
         "health_score_distribution": score_buckets,
         "top_10_chat_users":    top_users,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAKER-CHECKER: Reversal Requests
+# ══════════════════════════════════════════════════════════════════════════════
+from models.fraud import ReversalRequest, TransactionDispute
+
+class ReversalRequestBody(BaseModel):
+    reason_code: str = Field(..., pattern="^(fraud_confirmed|erroneous_transfer|dispute_resolved)$")
+    reason_detail: Optional[str] = None
+
+
+class ReviewReversalBody(BaseModel):
+    decision:    str  = Field(..., pattern="^(approved|rejected)$")
+    review_note: Optional[str] = None
+
+
+@router.post("/transactions/{txn_id}/request-reversal", status_code=201)
+async def request_reversal(
+    txn_id: UUID,
+    body: ReversalRequestBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Maker step — any admin requests a reversal. A second admin must approve."""
+    txn = (await db.execute(select(Transaction).where(Transaction.id == txn_id))).scalar_one_or_none()
+    if not txn:
+        raise HTTPException(404, "Transaction not found")
+    if txn.status not in ("completed",):
+        raise HTTPException(400, f"Cannot request reversal for txn in status '{txn.status}'")
+
+    existing = (await db.execute(
+        select(ReversalRequest)
+        .where(ReversalRequest.txn_id == txn_id,
+               ReversalRequest.status == "pending")
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(409, "A pending reversal request already exists for this transaction")
+
+    req = ReversalRequest(
+        txn_id=txn_id,
+        requested_by=admin.id,
+        reason_code=body.reason_code,
+        reason_detail=body.reason_detail,
+        status="pending",
+    )
+    db.add(req)
+    await db.commit()
+    await db.refresh(req)
+    await log_admin_action(db, admin.id, "request_reversal", txn_id, "transaction",
+                           f"{body.reason_code}: {body.reason_detail or ''}")
+    return {
+        "reversal_request_id": str(req.id),
+        "txn_id":              str(txn_id),
+        "status":              "pending",
+        "message":             "Reversal request submitted. Awaiting second-admin approval.",
+    }
+
+
+@router.post("/reversal-requests/{req_id}/review")
+async def review_reversal_request(
+    req_id: UUID,
+    body: ReviewReversalBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Checker step — a *different* admin approves or rejects the reversal request.
+    On approval the reversal is executed immediately (same logic as reverse_transaction).
+    """
+    req = (await db.execute(
+        select(ReversalRequest).where(ReversalRequest.id == req_id)
+    )).scalar_one_or_none()
+    if not req:
+        raise HTTPException(404, "Reversal request not found")
+    if req.status != "pending":
+        raise HTTPException(400, f"Request already {req.status}")
+    if req.requested_by == admin.id:
+        raise HTTPException(403, "Maker and Checker must be different admins")
+
+    req.reviewed_by  = admin.id
+    req.reviewed_at  = _utcnow()
+    req.review_note  = body.review_note
+    req.status       = body.decision
+
+    if body.decision == "approved":
+        txn = (await db.execute(
+            select(Transaction)
+            .where(Transaction.id == req.txn_id)
+            .with_for_update()
+        )).scalar_one_or_none()
+        if not txn:
+            raise HTTPException(404, "Transaction not found")
+        if txn.status in ("reversed",):
+            raise HTTPException(400, "Transaction already reversed")
+
+        from models.wallet import Wallet
+        from models.fraud import WalletDebt, FraudFlag
+
+        if txn.sender_id:
+            sender_wallet = (await db.execute(
+                select(Wallet).where(Wallet.user_id == txn.sender_id).with_for_update()
+            )).scalar_one_or_none()
+        else:
+            sender_wallet = None
+
+        recipient_wallet = None
+        available = Decimal("0")
+        if txn.recipient_id:
+            recipient_wallet = (await db.execute(
+                select(Wallet).where(Wallet.user_id == txn.recipient_id).with_for_update()
+            )).scalar_one_or_none()
+            if recipient_wallet:
+                available = min(txn.amount, recipient_wallet.balance)
+
+        is_partial = available < txn.amount
+        shortfall  = txn.amount - available
+
+        if recipient_wallet and available > 0:
+            recipient_wallet.balance -= available
+        if sender_wallet:
+            sender_wallet.balance += available
+
+        txn.status      = "reversed"
+        txn.reviewed_by = admin.id
+
+        if is_partial and txn.recipient_id:
+            db.add(WalletDebt(
+                user_id=txn.recipient_id,
+                amount_pkr=shortfall,
+                reason=f"Reversal shortfall (approved by {admin.id}): {req.reason_code}",
+                source_transaction_id=txn.id,
+                due_at=_utcnow() + timedelta(days=30),
+            ))
+
+        await db.commit()
+        await log_admin_action(db, admin.id, "approve_reversal", req.txn_id, "transaction",
+                               f"Reversal approved. Partial={is_partial}")
+        msg = (
+            f"Reversal approved and executed. "
+            f"PKR {float(available):,.2f} refunded to sender."
+            + (f" WalletDebt PKR {float(shortfall):,.2f} created." if is_partial else "")
+        )
+    else:
+        await db.commit()
+        await log_admin_action(db, admin.id, "reject_reversal", req.txn_id, "transaction",
+                               body.review_note or "")
+        msg = "Reversal request rejected."
+
+    return {"reversal_request_id": str(req_id), "decision": body.decision, "message": msg}
+
+
+@router.get("/reversal-requests")
+async def list_reversal_requests(
+    status: Optional[str] = "pending",
+    page: int = 1, per_page: int = 25,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(ReversalRequest).order_by(desc(ReversalRequest.created_at))
+    if status:
+        q = q.where(ReversalRequest.status == status)
+    rows = (await db.execute(q.offset((page - 1) * per_page).limit(per_page))).scalars().all()
+    return {
+        "requests": [
+            {
+                "id":            str(r.id),
+                "txn_id":        str(r.txn_id),
+                "requested_by":  str(r.requested_by),
+                "reason_code":   r.reason_code,
+                "reason_detail": r.reason_detail,
+                "status":        r.status,
+                "reviewed_by":   str(r.reviewed_by) if r.reviewed_by else None,
+                "reviewed_at":   r.reviewed_at.isoformat() if r.reviewed_at else None,
+                "review_note":   r.review_note,
+                "created_at":    r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
+        "page": page, "per_page": per_page,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DISPUTE MANAGEMENT — list, dismiss, evidence pre-check (Steps 10 & 11)
+# ══════════════════════════════════════════════════════════════════════════════
+MIN_EVIDENCE_CHARS = 30
+MAX_DISMISSALS_BEFORE_FLAG = 3
+
+
+class DisputeDecisionBody(BaseModel):
+    decision:   str  = Field(..., pattern="^(accept|dismiss)$")
+    admin_note: Optional[str] = None
+
+
+@router.get("/disputes")
+async def list_disputes(
+    status: Optional[str] = "open",
+    page: int = 1, per_page: int = 25,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(TransactionDispute).order_by(desc(TransactionDispute.created_at))
+    if status:
+        q = q.where(TransactionDispute.status == status)
+    rows = (await db.execute(q.offset((page - 1) * per_page).limit(per_page))).scalars().all()
+    return {
+        "disputes": [
+            {
+                "id":             str(d.id),
+                "transaction_id": str(d.transaction_id),
+                "user_id":        str(d.user_id),
+                "reason":         d.reason,
+                "evidence_note":  d.evidence_note,
+                "status":         d.status,
+                "created_at":     d.created_at.isoformat(),
+                "resolved_at":    d.resolved_at.isoformat() if d.resolved_at else None,
+                "resolved_by":    str(d.resolved_by) if d.resolved_by else None,
+            }
+            for d in rows
+        ],
+        "page": page, "per_page": per_page,
+    }
+
+
+@router.post("/disputes/{dispute_id}/review")
+async def review_dispute(
+    dispute_id: UUID,
+    body: DisputeDecisionBody,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Accept or dismiss a dispute.
+    Evidence pre-check: dispute must have >= 30 chars of evidence_note to be accepted.
+    Dismiss tracking: user dismissed_disputes_count incremented; flagged at 3+.
+    """
+    dispute = (await db.execute(
+        select(TransactionDispute).where(TransactionDispute.id == dispute_id)
+    )).scalar_one_or_none()
+    if not dispute:
+        raise HTTPException(404, "Dispute not found")
+    if dispute.status not in ("open", "under_review"):
+        raise HTTPException(400, f"Dispute already {dispute.status}")
+
+    # ── Evidence pre-check (Step 11) ─────────────────────────────────────────
+    if body.decision == "accept":
+        evidence = dispute.evidence_note or ""
+        if len(evidence.strip()) < MIN_EVIDENCE_CHARS:
+            raise HTTPException(
+                422,
+                f"Dispute evidence too thin ({len(evidence.strip())} chars). "
+                f"Minimum {MIN_EVIDENCE_CHARS} characters required before accepting."
+            )
+
+    dispute.status          = "resolved" if body.decision == "accept" else "dismissed"
+    dispute.resolved_at     = _utcnow()
+    dispute.resolved_by     = admin.id
+    dispute.resolution_note = body.admin_note
+
+    user = (await db.execute(select(User).where(User.id == dispute.user_id))).scalar_one_or_none()
+
+    if body.decision == "dismiss" and user:
+        user.dismissed_disputes_count = (user.dismissed_disputes_count or 0) + 1
+        if user.dismissed_disputes_count >= MAX_DISMISSALS_BEFORE_FLAG:
+            user.is_flagged = True
+            from models.other import FraudFlag as FF
+            db.add(FF(
+                user_id=user.id,
+                reason=f"Dispute abuse: {user.dismissed_disputes_count} dismissed disputes",
+                severity="medium",
+            ))
+
+    await db.commit()
+    await log_admin_action(db, admin.id, f"dispute_{body.decision}", dispute_id, "dispute",
+                           body.admin_note or "")
+
+    return {
+        "dispute_id": str(dispute_id),
+        "decision":   body.decision,
+        "new_status": dispute.status,
+        "dismissed_count": user.dismissed_disputes_count if user else None,
+        "user_flagged": user.is_flagged if user else False,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# INVESTMENT SOLVENCY CHECK  (Step 13)
+# ══════════════════════════════════════════════════════════════════════════════
+@router.get("/finance/solvency")
+async def investment_solvency_check(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns pool-level solvency report:
+    - investment_pool balance vs total active principal + expected returns
+    - insurance_pool balance vs active policy premiums
+    - gold_platform balance vs total user gold investments
+    - savings_pool balance vs total saved amounts across all goals
+    """
+    from models.gold import GoldHolding
+    from models.savings import SavingGoal
+
+    # Pool balances
+    pool_rows = (await db.execute(
+        select(PlatformAccount.type, PlatformAccount.balance)
+    )).all()
+    pools = {row[0]: float(row[1] or 0) for row in pool_rows}
+
+    # Investment pool obligation
+    inv_principal = (await db.execute(
+        select(func.coalesce(func.sum(Investment.amount), 0))
+        .where(Investment.status == "active")
+    )).scalar() or 0
+    inv_expected_returns = (await db.execute(
+        select(func.coalesce(func.sum(Investment.expected_return), 0))
+        .where(Investment.status == "active")
+    )).scalar() or 0
+    hyd_principal = (await db.execute(
+        select(func.coalesce(func.sum(HighYieldDeposit.amount), 0))
+        .where(HighYieldDeposit.status == "active")
+    )).scalar() or 0
+    hyd_expected_interest = (await db.execute(
+        select(func.coalesce(func.sum(HighYieldDeposit.expected_interest), 0))
+        .where(HighYieldDeposit.status == "active")
+    )).scalar() or 0
+
+    total_inv_obligation  = float(inv_principal) + float(inv_expected_returns) + float(hyd_principal) + float(hyd_expected_interest)
+    inv_pool_bal          = pools.get("investment_pool", 0)
+    inv_shortfall         = max(0, total_inv_obligation - inv_pool_bal)
+
+    # Insurance pool obligation
+    ins_premiums = (await db.execute(
+        select(func.coalesce(func.sum(InsurancePolicy.premium_paid), 0))
+        .where(InsurancePolicy.status == "active")
+    )).scalar() or 0
+    ins_pool_bal  = pools.get("insurance_pool", 0)
+    ins_shortfall = max(0, float(ins_premiums) - ins_pool_bal)
+
+    # Gold pool obligation
+    gold_invested = (await db.execute(
+        select(func.coalesce(func.sum(GoldHolding.total_invested_pkr), 0))
+    )).scalar() or 0
+    gold_pool_bal  = pools.get("gold_platform", 0)
+    gold_shortfall = max(0, float(gold_invested) - gold_pool_bal)
+
+    # Savings pool obligation
+    savings_total = (await db.execute(
+        select(func.coalesce(func.sum(SavingGoal.saved_amount), 0))
+        .where(SavingGoal.is_completed == False)
+    )).scalar() or 0
+    savings_pool_bal  = pools.get("savings_pool", 0)
+    savings_shortfall = max(0, float(savings_total) - savings_pool_bal)
+
+    overall_solvent = all(s == 0 for s in [inv_shortfall, ins_shortfall, gold_shortfall, savings_shortfall])
+
+    return {
+        "overall_solvent": overall_solvent,
+        "pools": {
+            "investment_pool": {
+                "balance":     inv_pool_bal,
+                "obligation":  total_inv_obligation,
+                "shortfall":   inv_shortfall,
+                "solvent":     inv_shortfall == 0,
+            },
+            "insurance_pool": {
+                "balance":    ins_pool_bal,
+                "obligation": float(ins_premiums),
+                "shortfall":  ins_shortfall,
+                "solvent":    ins_shortfall == 0,
+            },
+            "gold_platform": {
+                "balance":    gold_pool_bal,
+                "obligation": float(gold_invested),
+                "shortfall":  gold_shortfall,
+                "solvent":    gold_shortfall == 0,
+            },
+            "savings_pool": {
+                "balance":    savings_pool_bal,
+                "obligation": float(savings_total),
+                "shortfall":  savings_shortfall,
+                "solvent":    savings_shortfall == 0,
+            },
+        },
+        "platform_revenue": pools.get("platform_revenue", 0),
+        "main_float":        pools.get("main_float", 0),
+        "checked_at":        _utcnow().isoformat(),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ON-DEMAND RECONCILIATION TRIGGER  (Step 12)
+# ══════════════════════════════════════════════════════════════════════════════
+@router.post("/reconciliation/run")
+async def trigger_reconciliation(
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger the reconciliation job — does not wait for 01:00 UTC."""
+    import asyncio
+    from scheduler.reconciliation_scheduler import _run_reconciliation
+    asyncio.create_task(_run_reconciliation())
+    return {
+        "message": "Reconciliation job triggered in background. "
+                   "Check admin notifications for any discrepancies.",
+        "triggered_by": str(admin.id),
+        "triggered_at": _utcnow().isoformat(),
+    }
+
+
+@router.get("/platform/ledger")
+async def platform_ledger(
+    account_type: Optional[str] = None,
+    page: int = 1, per_page: int = 50,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Browse platform ledger entries — optionally filtered by account type."""
+    q = (
+        select(PlatformLedgerEntry, PlatformAccount.type)
+        .join(PlatformAccount, PlatformLedgerEntry.account_id == PlatformAccount.id)
+        .order_by(desc(PlatformLedgerEntry.created_at))
+    )
+    if account_type:
+        q = q.where(PlatformAccount.type == account_type)
+
+    rows = (await db.execute(q.offset((page - 1) * per_page).limit(per_page))).all()
+    return {
+        "entries": [
+            {
+                "id":               str(e.id),
+                "account_type":     atype,
+                "direction":        e.direction,
+                "amount":           str(e.amount),
+                "idempotency_key":  e.idempotency_key,
+                "reference":        e.reference,
+                "note":             e.note,
+                "transaction_id":   str(e.transaction_id) if e.transaction_id else None,
+                "user_id":          str(e.user_id) if e.user_id else None,
+                "created_at":       e.created_at.isoformat(),
+            }
+            for e, atype in rows
+        ],
+        "page": page, "per_page": per_page,
     }

@@ -11,6 +11,7 @@ from models.savings import SavingGoal
 from models.wallet import Wallet
 from models.transaction import Transaction
 from services.wallet_service import generate_reference, _send_fcm
+from services.platform_ledger import ledger_credit, make_idem_key
 
 scheduler = AsyncIOScheduler(timezone="UTC")
 
@@ -102,6 +103,12 @@ async def _process_auto_deductions():
                     completed_at=_utcnow(),
                 )
                 db.add(txn)
+                await ledger_credit(
+                    db, "savings_pool", deduct,
+                    make_idem_key("savings_auto_deduct", str(goal.user_id), str(goal.id), ref),
+                    user_id=goal.user_id, reference=ref,
+                    note=f"Auto-deduction: {goal.goal_name}",
+                )
 
                 # Check if goal now complete
                 if goal.saved_amount >= goal.target_amount:

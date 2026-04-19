@@ -38,11 +38,15 @@ class InsurancePolicy(Base):
     policy_type  = Column(String(100), nullable=False)
     plan_name    = Column(String(255), nullable=False)
     premium      = Column(Numeric(10, 2), nullable=False)
+    premium_paid = Column(Numeric(10, 2), nullable=True)   # actual amount deducted (for refund calc)
     coverage     = Column(Numeric(12, 2), nullable=False)
     status       = Column(String(20), server_default="active")   # active | cancelled | expired
+    policy_start = Column(DateTime(timezone=True), server_default=func.now())
+    policy_end   = Column(DateTime(timezone=True), nullable=True)  # same as expires_at
     activated_at = Column(DateTime(timezone=True), server_default=func.now())
     expires_at   = Column(DateTime(timezone=True))
     cancelled_at = Column(DateTime(timezone=True))
+    refund_paid  = Column(Numeric(10, 2), nullable=True)   # how much was refunded on cancel
 
     user = relationship("User", back_populates="insurance_policies")
 

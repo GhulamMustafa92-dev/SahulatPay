@@ -14,6 +14,7 @@ from models.wallet import Wallet
 from models.transaction import Transaction
 from services.auth_service import get_current_user
 from services.wallet_service import generate_reference
+from services.platform_ledger import ledger_credit, make_idem_key
 
 router = APIRouter()
 
@@ -23,7 +24,8 @@ def _utcnow():
     return datetime.now(timezone.utc)
 
 
-async def _deduct_wallet(db, user_id, amount: Decimal, ref, txn_type, purpose, description, metadata):
+async def _deduct_wallet(db, user_id, amount: Decimal, ref, txn_type, purpose, description, metadata,
+                         account_type: str = "main_float"):
     wallet = (await db.execute(select(Wallet).where(Wallet.user_id == user_id))).scalar_one_or_none()
     if not wallet:
         raise HTTPException(404, "Wallet not found")
@@ -45,6 +47,9 @@ async def _deduct_wallet(db, user_id, amount: Decimal, ref, txn_type, purpose, d
         completed_at=_utcnow(),
     )
     db.add(txn)
+    idem_key = make_idem_key("ext_deduct", account_type, str(user_id), ref)
+    await ledger_credit(db, account_type, amount, idem_key,
+                        user_id=user_id, reference=ref, note=description)
     await db.commit()
     await db.refresh(wallet)
     return wallet

@@ -1,5 +1,5 @@
 """Fraud detection models — user_behaviour_profiles, wallet_debts,
-transaction_disputes, str_reports."""
+transaction_disputes, str_reports, reversal_requests."""
 from sqlalchemy import (
     Column, String, Boolean, Integer, Numeric,
     Text, DateTime, ForeignKey,
@@ -36,8 +36,14 @@ class WalletDebt(Base):
     reason                = Column(String(255), nullable=False)
     source_transaction_id = Column(UUID(as_uuid=True), ForeignKey("transactions.id"), nullable=True)
     due_at                = Column(DateTime(timezone=True), nullable=False)
+    debt_stage            = Column(
+        SAEnum("soft", "intercept", "hard", name="debt_stage_enum"),
+        server_default="soft",
+        nullable=False,
+    )
     is_settled            = Column(Boolean, server_default="false")
     settled_at            = Column(DateTime(timezone=True), nullable=True)
+    last_notified_at      = Column(DateTime(timezone=True), nullable=True)
     created_at            = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="wallet_debts")
@@ -90,3 +96,28 @@ class StrReport(Base):
     submission_ref = Column(String(100), nullable=True)
 
     user = relationship("User", back_populates="str_reports", foreign_keys=[user_id])
+
+
+class ReversalRequest(Base):
+    """Maker-Checker: admin requests reversal, second admin approves/rejects."""
+    __tablename__ = "reversal_requests"
+
+    id            = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    txn_id        = Column(UUID(as_uuid=True), ForeignKey("transactions.id"), nullable=False)
+    requested_by  = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    reason_code   = Column(
+        SAEnum("fraud_confirmed", "erroneous_transfer", "dispute_resolved",
+               name="reversal_reason_code_enum"),
+        nullable=False,
+    )
+    reason_detail = Column(Text, nullable=True)
+    status        = Column(
+        SAEnum("pending", "approved", "rejected",
+               name="reversal_request_status_enum"),
+        server_default="pending",
+        nullable=False,
+    )
+    reviewed_by   = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    reviewed_at   = Column(DateTime(timezone=True), nullable=True)
+    review_note   = Column(Text, nullable=True)
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())

@@ -42,6 +42,12 @@ def generate_reference() -> str:
     return "SP" + "".join(secrets.choice(chars) for _ in range(14))
 
 
+def generate_gateway_ref() -> str:
+    """UUID4 string used as gateway_reference_id for reconciliation with real gateways."""
+    import uuid
+    return str(uuid.uuid4())
+
+
 def verify_pin(pin: str, pin_hash: str) -> bool:
     return bcrypt.checkpw(pin.encode("utf-8"), pin_hash.encode("utf-8"))
 
@@ -95,7 +101,10 @@ async def _execute_transfer(
     sender_wallet.daily_spent     = (sender_wallet.daily_spent or Decimal("0")) + amount
     sender_wallet.cashback_pending = (sender_wallet.cashback_pending or Decimal("0")) + cashback
     sender_wallet.limit_reset_at  = _utcnow()
-    recipient_wallet.balance      += amount
+
+    from scheduler.debt_scheduler import intercept_incoming_credit
+    net_credit = await intercept_incoming_credit(db, recipient.id, amount)
+    recipient_wallet.balance      += net_credit
 
     if card_id:
         from models.card import VirtualCard

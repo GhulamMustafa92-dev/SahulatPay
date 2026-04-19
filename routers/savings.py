@@ -16,6 +16,7 @@ from models.transaction import Transaction
 from models.savings import SavingGoal
 from services.auth_service import get_current_user
 from services.wallet_service import generate_reference, _send_fcm
+from services.platform_ledger import ledger_credit, ledger_debit, make_idem_key
 from schemas.savings import (
     SavingGoalCreate, SavingGoalResponse, SavingGoalListResponse,
     DepositRequest, WithdrawRequest, AutoDeductUpdate,
@@ -181,6 +182,10 @@ async def deposit_to_goal(
         completed_at=_utcnow(),
     )
     db.add(txn)
+    await ledger_credit(db, "savings_pool", body.amount,
+                        make_idem_key("savings_deposit", str(current_user.id), str(goal_id), ref),
+                        user_id=current_user.id, reference=ref,
+                        note=f"Goal deposit: {goal.goal_name}")
 
     # Check if goal reached 100%
     achieved = goal.saved_amount >= goal.target_amount
@@ -188,11 +193,16 @@ async def deposit_to_goal(
         goal.is_completed  = True
         goal.goal_achieved = True
         goal.auto_deduct_enabled = False
-        # Refund overshoot
+        # Refund overshoot — debit savings_pool back to wallet
         overshoot = goal.saved_amount - goal.target_amount
         if overshoot > 0:
             wallet.balance    += overshoot
             goal.saved_amount  = goal.target_amount
+            overshoot_ref = generate_reference()
+            await ledger_debit(db, "savings_pool", overshoot,
+                               make_idem_key("savings_overshoot", str(current_user.id), str(goal_id), overshoot_ref),
+                               user_id=current_user.id, reference=overshoot_ref,
+                               note=f"Goal overshoot refund: {goal.goal_name}")
         await db.commit()
         await db.refresh(goal)
         await db.refresh(wallet)
@@ -243,6 +253,10 @@ async def withdraw_from_goal(
         completed_at=_utcnow(),
     )
     db.add(txn)
+    await ledger_debit(db, "savings_pool", body.amount,
+                       make_idem_key("savings_withdraw", str(current_user.id), str(goal_id), ref),
+                       user_id=current_user.id, reference=ref,
+                       note=f"Goal withdrawal: {goal.goal_name}")
     await db.commit()
     await db.refresh(goal)
 
@@ -349,6 +363,10 @@ async def delete_goal(
                 completed_at=_utcnow(),
             )
             db.add(txn)
+            await ledger_debit(db, "savings_pool", refund,
+                               make_idem_key("savings_delete_refund", str(current_user.id), str(goal_id), ref),
+                               user_id=current_user.id, reference=ref,
+                               note=f"Goal delete refund: {goal.goal_name}")
 
     await db.delete(goal)
     await db.commit()

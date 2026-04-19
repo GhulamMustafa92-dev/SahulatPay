@@ -18,6 +18,7 @@ from models.wallet import Wallet
 from models.transaction import Transaction
 from services.auth_service import get_current_user
 from services.wallet_service import generate_reference
+from services.platform_ledger import ledger_credit, ledger_debit, make_idem_key
 
 router = APIRouter()
 
@@ -33,7 +34,8 @@ async def _verify_pin(user: User, pin: str):
         raise HTTPException(401, "Incorrect PIN")
 
 
-async def _deduct(db, user_id, amount: Decimal, ref, txn_type, purpose, desc, meta):
+async def _deduct(db, user_id, amount: Decimal, ref, txn_type, purpose, desc, meta,
+                  account_type: str = "main_float"):
     wallet = (await db.execute(select(Wallet).where(Wallet.user_id == user_id))).scalar_one_or_none()
     if not wallet:
         raise HTTPException(404, "Wallet not found")
@@ -49,12 +51,16 @@ async def _deduct(db, user_id, amount: Decimal, ref, txn_type, purpose, desc, me
         completed_at=_utcnow(),
     )
     db.add(txn)
+    idem_key = make_idem_key("deduct", account_type, str(user_id), ref)
+    await ledger_credit(db, account_type, amount, idem_key,
+                        user_id=user_id, reference=ref, note=desc)
     await db.commit()
     await db.refresh(wallet)
     return wallet
 
 
-async def _credit(db, user_id, amount: Decimal, ref, txn_type, purpose, desc, meta):
+async def _credit(db, user_id, amount: Decimal, ref, txn_type, purpose, desc, meta,
+                  account_type: str = "main_float"):
     wallet = (await db.execute(select(Wallet).where(Wallet.user_id == user_id))).scalar_one_or_none()
     if wallet:
         wallet.balance += amount
@@ -65,6 +71,9 @@ async def _credit(db, user_id, amount: Decimal, ref, txn_type, purpose, desc, me
             completed_at=_utcnow(),
         )
         db.add(txn)
+        idem_key = make_idem_key("credit", account_type, str(user_id), ref)
+        await ledger_debit(db, account_type, amount, idem_key,
+                           user_id=user_id, reference=ref, note=desc)
         await db.commit()
         await db.refresh(wallet)
     return wallet
@@ -138,6 +147,7 @@ async def create_investment(
         "investment", "Investment",
         f"Investment: {body.plan_name} @ {body.return_rate}% p.a.",
         {"plan_name": body.plan_name, "return_rate": str(body.return_rate)},
+        account_type="investment_pool",
     )
     inv = Investment(
         user_id=current_user.id,
@@ -193,6 +203,7 @@ async def withdraw_investment(
         "investment", "Investment",
         f"Investment withdrawal: {inv.plan_name}" + (" (matured)" if is_matured else " (early)"),
         {"plan_name": inv.plan_name, "matured": is_matured},
+        account_type="investment_pool",
     )
     return {
         "status":       "withdrawn",
@@ -262,14 +273,18 @@ async def create_insurance(
         "bill", "Insurance",
         f"Insurance premium: {body.plan_name} ({body.policy_type})",
         {"policy_type": body.policy_type, "plan_name": body.plan_name},
+        account_type="insurance_pool",
     )
     policy = InsurancePolicy(
         user_id=current_user.id,
         policy_type=body.policy_type,
         plan_name=body.plan_name,
         premium=body.premium,
+        premium_paid=body.premium,
         coverage=body.coverage,
         expires_at=body.expires_at,
+        policy_start=_utcnow(),
+        policy_end=body.expires_at,
         status="active",
     )
     db.add(policy)
@@ -300,10 +315,70 @@ async def deactivate_insurance(
         raise HTTPException(404, "Policy not found")
     if policy.status != "active":
         raise HTTPException(400, f"Policy is already {policy.status}")
+
+    now           = _utcnow()
+    premium_paid  = policy.premium_paid or policy.premium or Decimal("0")
+    policy_start  = policy.policy_start or policy.activated_at or now
+    policy_end    = policy.policy_end or policy.expires_at
+
+    # ── Pro-rata refund calculation ───────────────────────────────────────────
+    days_since_start = max(0, (now - policy_start).days)
+    if days_since_start <= 15:
+        # Cooling-off period — 100% refund
+        refund_amount = premium_paid
+        refund_note   = "Insurance cancel — cooling-off period (100% refund)"
+    elif policy_end:
+        total_days    = max(1, (policy_end - policy_start).days)
+        days_remaining= max(0, (policy_end - now).days)
+        refund_amount = (Decimal(str(days_remaining)) / Decimal(str(total_days))) * premium_paid
+        refund_amount = refund_amount.quantize(Decimal("0.01"))
+        refund_note   = (
+            f"Insurance cancel — pro-rata refund ({days_remaining}/{total_days} days remaining)"
+        )
+    else:
+        refund_amount = Decimal("0")
+        refund_note   = "Insurance cancel — no refund (no expiry date set)"
+
     policy.status       = "cancelled"
-    policy.cancelled_at = _utcnow()
+    policy.cancelled_at = now
+    policy.refund_paid  = refund_amount
+
+    if refund_amount > 0:
+        wallet = (await db.execute(
+            select(Wallet).where(Wallet.user_id == current_user.id)
+        )).scalar_one_or_none()
+        if wallet:
+            wallet.balance += refund_amount
+        ref = generate_reference()
+        db.add(Transaction(
+            reference_number=ref, type="bill", amount=refund_amount,
+            fee=Decimal("0"), status="completed", recipient_id=current_user.id,
+            purpose="Insurance", description=refund_note,
+            tx_metadata={"policy_id": str(policy_id)},
+            completed_at=now,
+        ))
+        await ledger_debit(db, "insurance_pool", refund_amount,
+                           make_idem_key("insurance_refund", str(current_user.id), str(policy_id)),
+                           user_id=current_user.id, reference=ref, note=refund_note)
+
+        earned = premium_paid - refund_amount
+        if earned > 0:
+            await ledger_debit(db, "insurance_pool", earned,
+                               make_idem_key("insurance_earned", str(current_user.id), str(policy_id)),
+                               user_id=current_user.id, reference=ref,
+                               note="Insurance earned premium moved to revenue")
+            await ledger_credit(db, "platform_revenue", earned,
+                                make_idem_key("insurance_earned_rev", str(current_user.id), str(policy_id)),
+                                user_id=current_user.id, reference=ref,
+                                note="Insurance earned premium")
+
     await db.commit()
-    return {"status": "cancelled", "policy_id": str(policy_id), "message": f"Policy '{policy.plan_name}' cancelled."}
+    return {
+        "status":         "cancelled",
+        "policy_id":      str(policy_id),
+        "refund_amount":  str(refund_amount),
+        "message":        f"Policy '{policy.plan_name}' cancelled. PKR {refund_amount:,.2f} refunded.",
+    }
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -367,6 +442,7 @@ async def create_high_yield(
         "investment", "Investment",
         f"High-yield deposit @ {body.interest_rate}% for {body.period_days} days",
         {"interest_rate": str(body.interest_rate), "period_days": body.period_days},
+        account_type="investment_pool",
     )
     deposit = HighYieldDeposit(
         user_id=current_user.id,
@@ -423,6 +499,7 @@ async def withdraw_high_yield(
         "investment", "Investment",
         f"High-yield withdrawal" + (" (early — interest forfeited)" if early else " (matured)"),
         {"deposit_id": str(deposit_id), "early": early},
+        account_type="investment_pool",
     )
     return {
         "status":          "withdrawn",

@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, String, Boolean, Integer, Numeric, Text,
-    DateTime, ForeignKey, CheckConstraint, Index,
+    DateTime, ForeignKey, CheckConstraint, Index, text,
 )
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.sql import func
@@ -48,6 +48,8 @@ class Transaction(Base):
     deepseek_score           = Column(Integer, nullable=True)
     deepseek_recommendation  = Column(String(20), nullable=True)
     fraud_score              = Column(Integer, server_default="0")
+    gateway_reference_id     = Column(String(36), unique=True, nullable=True, index=True,
+                                        server_default=text("gen_random_uuid()::text"))
     completed_at             = Column(DateTime(timezone=True))
     created_at               = Column(DateTime(timezone=True), server_default=func.now())
 

@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, String, Boolean, SmallInteger, Text,
+    Column, String, Boolean, SmallInteger, Integer, Text,
     DateTime, Date, Index, UniqueConstraint, ForeignKey,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -34,8 +34,9 @@ class User(Base):
     is_locked            = Column(Boolean, server_default="false")
     is_active            = Column(Boolean, server_default="true")
     is_flagged           = Column(Boolean, server_default="false")
-    risk_score           = Column(SmallInteger, server_default="0")
-    account_type         = Column(String(20),  server_default="individual")
+    risk_score                = Column(SmallInteger, server_default="0")
+    dismissed_disputes_count  = Column(Integer, server_default="0", nullable=False)
+    account_type              = Column(String(20),  server_default="individual")
     biometric_enabled    = Column(Boolean, server_default="false")
     cnic_verified        = Column(Boolean, server_default="false")
     biometric_verified   = Column(Boolean, server_default="false")
@@ -85,6 +86,7 @@ class User(Base):
     wallet_debts         = relationship("WalletDebt",            back_populates="user",         cascade="all, delete-orphan")
     disputes             = relationship("TransactionDispute",     back_populates="user",         foreign_keys="TransactionDispute.user_id", cascade="all, delete-orphan")
     str_reports          = relationship("StrReport",             back_populates="user",         foreign_keys="StrReport.user_id",          cascade="all, delete-orphan")
+    gold_holding         = relationship("GoldHolding",            back_populates="user",         uselist=False, cascade="all, delete-orphan")
 
 
 class DeviceRegistry(Base):
