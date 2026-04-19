@@ -399,8 +399,49 @@ async def reverse_transaction(txn_id: UUID, body: UserActionRequest, admin: User
     elif sender_wallet:
         sender_wallet.balance = (sender_wallet.balance or Decimal("0")) + txn.amount
 
+    # ── Mark reviewed_by on the transaction ───────────────────────────────────
+    txn.reviewed_by = admin.id
+
+    # ── Auto-resolve linked FraudFlag (confirms fraud) ────────────────────────
+    linked_flag = (await db.execute(
+        select(FraudFlag)
+        .where(FraudFlag.transaction_id == txn_id, FraudFlag.is_resolved == False)
+        .order_by(desc(FraudFlag.created_at))
+        .limit(1)
+    )).scalar_one_or_none()
+    if linked_flag:
+        linked_flag.is_resolved     = True
+        linked_flag.resolved_by     = admin.id
+        linked_flag.resolved_at     = _utcnow()
+        linked_flag.resolution_note = f"Transaction reversed by admin. Reason: {body.reason}"
+
+    # ── Auto-resolve linked TransactionDispute (if any) ───────────────────────
+    from models.fraud import TransactionDispute
+    linked_dispute = (await db.execute(
+        select(TransactionDispute)
+        .where(TransactionDispute.transaction_id == txn_id,
+               TransactionDispute.status.in_(["open", "under_review"]))
+    )).scalar_one_or_none()
+    if linked_dispute:
+        linked_dispute.status          = "resolved"
+        linked_dispute.resolved_at     = _utcnow()
+        linked_dispute.resolved_by     = admin.id
+        linked_dispute.resolution_note = f"Transaction reversed. Refund issued. Reason: {body.reason}"
+
     await db.commit()
     await log_admin_action(db, admin.id, "reverse_transaction", txn_id, "transaction", body.reason)
+
+    # ── Notify sender about refund ────────────────────────────────────────────
+    if txn.sender_id:
+        refunded_amount = float(txn.amount) if not is_partial else float(available)
+        await send_notification(
+            db, txn.sender_id,
+            "Transaction Reversed — Refund Issued",
+            f"PKR {refunded_amount:,.2f} has been refunded to your wallet following a transaction review.",
+            "security",
+            {"transaction_id": str(txn_id), "refund_amount": str(refunded_amount)},
+        )
+
     msg = (
         f"Partial reversal. PKR {float(available):,.2f} refunded to sender. "
         f"WalletDebt of PKR {float(shortfall):,.2f} created for recipient (due in 30 days)."
