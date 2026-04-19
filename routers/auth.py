@@ -350,6 +350,7 @@ async def login_new_device_verify(
 
     ok = await _verify_and_consume_otp(db, user.phone_number, body.otp, "new_device")
     if not ok:
+        await _log_login(db, request, user.id, user.phone_number, dfp, False, "bad_otp")
         raise HTTPException(status_code=400, detail="Invalid or expired OTP")
 
     # Trust the device

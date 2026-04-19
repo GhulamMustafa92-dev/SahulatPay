@@ -645,12 +645,19 @@ async def list_all_insurance(page: int = 1, per_page: int = 25, admin: User = De
 # ══════════════════════════════════════════════════════════════════════════════
 @router.get("/audit-log")
 async def audit_log(
-    page: int = 1, per_page: int = 25, action_type: Optional[str] = None,
+    page: int = 1, per_page: int = 25,
+    action_type: Optional[str] = None,
+    admin_id: Optional[UUID] = None,
+    target_user_id: Optional[UUID] = None,
     admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     q = select(AdminAction)
     if action_type:
         q = q.where(AdminAction.action_type == action_type)
+    if admin_id:
+        q = q.where(AdminAction.admin_id == admin_id)
+    if target_user_id:
+        q = q.where(AdminAction.target_user_id == target_user_id)
     total  = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
     actions = (await db.execute(q.order_by(desc(AdminAction.created_at)).offset((page - 1) * per_page).limit(per_page))).scalars().all()
     return {
@@ -660,6 +667,46 @@ async def audit_log(
              "reason": a.reason, "action_metadata": a.action_metadata,
              "created_at": a.created_at.isoformat() if a.created_at else None}
             for a in actions
+        ],
+        "total": total, "page": page,
+    }
+
+
+@router.get("/login-audit")
+async def login_audit(
+    page: int = 1, per_page: int = 25,
+    user_id: Optional[UUID] = None,
+    success: Optional[bool] = None,
+    failure_reason: Optional[str] = None,
+    admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db),
+):
+    """Browse the login_audit table. Filterable by user, success/failure, and failure reason."""
+    from models.user import LoginAudit
+    q = select(LoginAudit)
+    if user_id:
+        q = q.where(LoginAudit.user_id == user_id)
+    if success is not None:
+        q = q.where(LoginAudit.success == success)
+    if failure_reason:
+        q = q.where(LoginAudit.failure_reason == failure_reason)
+    total = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
+    rows  = (await db.execute(
+        q.order_by(desc(LoginAudit.created_at)).offset((page - 1) * per_page).limit(per_page)
+    )).scalars().all()
+    return {
+        "attempts": [
+            {
+                "id":                str(r.id),
+                "user_id":           str(r.user_id) if r.user_id else None,
+                "phone_number":      r.phone_number,
+                "ip_address":        r.ip_address,
+                "user_agent":        r.user_agent,
+                "device_fingerprint": r.device_fingerprint,
+                "success":           r.success,
+                "failure_reason":    r.failure_reason,
+                "created_at":        r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
         ],
         "total": total, "page": page,
     }
