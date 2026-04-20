@@ -141,24 +141,6 @@ async def _log_login(db: AsyncSession, request: Request, user_id: UUID | None, p
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DEV — read OTP from in-memory store (only available when DEV_MODE=True)
-# ══════════════════════════════════════════════════════════════════════════════
-@router.get("/dev/otp")
-async def get_dev_otp(phone: str):
-    """Return the last OTP sent to a phone number. DEV_MODE only."""
-    if not settings.DEV_MODE:
-        raise HTTPException(status_code=404, detail="Not found")
-    try:
-        normalized = normalize_phone(phone)
-    except ValueError:
-        normalized = phone
-    otp = DEV_OTP_STORE.get(normalized) or DEV_OTP_STORE.get(phone)
-    if not otp:
-        raise HTTPException(status_code=404, detail="No OTP found for this number")
-    return {"otp": otp}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 # REGISTER
 # ══════════════════════════════════════════════════════════════════════════════
 @router.post("/register", response_model=RegisterResponse, status_code=201)
