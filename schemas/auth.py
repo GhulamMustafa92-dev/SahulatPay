@@ -22,11 +22,16 @@ class RegisterRequest(BaseModel):
     device_os:          Optional[str]     = None
 
 
+class PreRegisterResponse(BaseModel):
+    phone_masked: str
+    message:      str = "OTP sent to your phone. Please verify to complete registration."
+
+
 class RegisterResponse(BaseModel):
     user_id:      UUID
     phone_masked: str
-    tokens:       "TokenPair"          # user is immediately logged in after register
-    message:      str = "Account created and verified via Firebase."
+    tokens:       "TokenPair"
+    message:      str = "Account created successfully."
 
 
 # ── OTP ───────────────────────────────────────────────────────────────────────

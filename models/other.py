@@ -45,9 +45,12 @@ class PendingRegistration(Base):
     cnic_masked   = Column(String(20))
     date_of_birth = Column(DateTime(timezone=True))
     age           = Column(SmallInteger)
-    account_type  = Column(String(20), server_default="individual")
-    expires_at    = Column(DateTime(timezone=True), nullable=False)
-    created_at    = Column(DateTime(timezone=True), server_default=func.now())
+    account_type       = Column(String(20), server_default="individual")
+    device_fingerprint = Column(String(255), nullable=True)
+    device_name        = Column(String(255), nullable=True)
+    device_os          = Column(String(100), nullable=True)
+    expires_at         = Column(DateTime(timezone=True), nullable=False)
+    created_at         = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class OtpCode(Base):
