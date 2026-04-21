@@ -248,12 +248,28 @@ async def verify_liveness(
 ):
     """
     Compare selfie vs stored CNIC front photo using Face++.
-    Confidence > 80% → Tier 3 upgrade (PKR 5,00,000/day).
+    Confidence ≥ 75% → create a pending liveness review for admin approval.
+    Admin approval → Tier 3 upgrade (PKR 5,00,000/day).
     """
     if current_user.verification_tier < 2:
         raise HTTPException(400, "Complete CNIC verification (Tier 2) before liveness check.")
     if current_user.verification_tier >= 3:
         return {"message": "Liveness already verified.", "tier": current_user.verification_tier}
+
+    # Block duplicate pending liveness review
+    existing_pending = (await db.execute(
+        select(KycReviewRequest).where(
+            KycReviewRequest.user_id    == current_user.id,
+            KycReviewRequest.review_type == "liveness",
+            KycReviewRequest.status      == "pending",
+        )
+    )).scalar_one_or_none()
+    if existing_pending:
+        return {
+            "status":     "pending_review",
+            "tier":       current_user.verification_tier,
+            "message":    "Your liveness check is already under review. You will be notified once approved.",
+        }
 
     selfie_bytes = await selfie.read()
     _check_file_size(selfie_bytes, "Selfie")
@@ -261,7 +277,7 @@ async def verify_liveness(
     # Retrieve CNIC front from DB to get the public_id
     cnic_front_doc = (await db.execute(
         select(Document).where(
-            Document.user_id      == current_user.id,
+            Document.user_id       == current_user.id,
             Document.document_type == "cnic_front",
         ).order_by(Document.uploaded_at.desc())
     )).scalar_one_or_none()
@@ -273,7 +289,7 @@ async def verify_liveness(
     signed_url = get_signed_url(cnic_front_doc.cloudinary_public_id)
     try:
         async with __import__("httpx").AsyncClient(timeout=20) as client:
-            cnic_resp = await client.get(signed_url)
+            cnic_resp  = await client.get(signed_url)
             cnic_bytes = cnic_resp.content
     except Exception as e:
         raise HTTPException(503, f"Could not retrieve CNIC document: {str(e)}")
@@ -283,27 +299,41 @@ async def verify_liveness(
 
     THRESHOLD = 75.0
     if confidence < THRESHOLD:
-        raise HTTPException(400, f"Liveness check failed. Face match confidence {confidence:.1f}% (minimum {THRESHOLD}% required). Please try again in good lighting.")
+        raise HTTPException(
+            400,
+            f"Liveness check failed. Face match confidence {confidence:.1f}% "
+            f"(minimum {THRESHOLD}% required). Please try again in good lighting."
+        )
 
-    # Upload selfie to Cloudinary
+    # ✅ AI passed — upload selfie to Cloudinary and create pending admin review
     selfie_pub_id = await upload_kyc_document(selfie_bytes, current_user.id, "liveness_selfie")
-    doc = Document(
+    selfie_doc = Document(
         user_id=current_user.id,
         document_type="liveness_selfie",
         cloudinary_public_id=selfie_pub_id,
     )
-    db.add(doc)
-    current_user.biometric_verified = True
+    db.add(selfie_doc)
+    await db.flush()  # get selfie_doc.id
 
-    wallet = (await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))).scalar_one_or_none()
-    await _bump_tier(current_user, wallet, 3, db)
+    review = KycReviewRequest(
+        user_id        = current_user.id,
+        review_type    = "liveness",
+        selfie_doc_id  = selfie_doc.id,
+        face_confidence= round(confidence, 2),
+        status         = "pending",
+    )
+    db.add(review)
+    await db.commit()
 
     return {
-        "status":      "verified",
+        "status":      "pending_review",
         "confidence":  round(confidence, 2),
         "tier":        current_user.verification_tier,
-        "daily_limit": _TIER_LIMITS[3],
-        "message":     f"Liveness verified ({confidence:.1f}% match). Tier 3 unlocked — PKR 5,00,000/day limit.",
+        "message":     (
+            f"Face match confirmed ({confidence:.1f}%). "
+            "Your liveness verification is now pending admin approval. "
+            "You will be notified once Tier 3 is unlocked."
+        ),
     }
 
 
@@ -477,23 +507,38 @@ async def kyc_status(
     wallet = (await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))).scalar_one_or_none()
 
     # Check for pending or latest CNIC review
-    latest_review = (await db.execute(
+    latest_cnic_review = (await db.execute(
         select(KycReviewRequest)
-        .where(KycReviewRequest.user_id == current_user.id)
+        .where(
+            KycReviewRequest.user_id    == current_user.id,
+            KycReviewRequest.review_type == "cnic",
+        )
         .order_by(KycReviewRequest.submitted_at.desc())
     )).scalar_one_or_none()
 
-    cnic_review = None
-    if latest_review:
-        cnic_review = {
-            "id":              str(latest_review.id),
-            "status":          latest_review.status,
-            "extracted_name":  latest_review.extracted_name,
-            "extracted_cnic":  latest_review.cnic_masked,
-            "extracted_dob":   latest_review.extracted_dob,
-            "rejection_reason": latest_review.rejection_reason,
-            "submitted_at":    latest_review.submitted_at.isoformat() if latest_review.submitted_at else None,
-            "reviewed_at":     latest_review.reviewed_at.isoformat() if latest_review.reviewed_at else None,
+    # Check for pending or latest liveness review
+    latest_liveness_review = (await db.execute(
+        select(KycReviewRequest)
+        .where(
+            KycReviewRequest.user_id    == current_user.id,
+            KycReviewRequest.review_type == "liveness",
+        )
+        .order_by(KycReviewRequest.submitted_at.desc())
+    )).scalar_one_or_none()
+
+    def _review_dict(r):
+        if not r:
+            return None
+        return {
+            "id":               str(r.id),
+            "status":           r.status,
+            "extracted_name":   r.extracted_name,
+            "extracted_cnic":   r.cnic_masked,
+            "extracted_dob":    r.extracted_dob,
+            "face_confidence":  r.face_confidence,
+            "rejection_reason": r.rejection_reason,
+            "submitted_at":     r.submitted_at.isoformat() if r.submitted_at else None,
+            "reviewed_at":      r.reviewed_at.isoformat() if r.reviewed_at else None,
         }
 
     return {
@@ -505,7 +550,8 @@ async def kyc_status(
         "fingerprint_verified": current_user.fingerprint_verified,
         "nadra_verified":       current_user.nadra_verified,
         "business_status":      business.verification_status if business else None,
-        "cnic_review":          cnic_review,
+        "cnic_review":          _review_dict(latest_cnic_review),
+        "liveness_review":      _review_dict(latest_liveness_review),
         "next_step": (
             "Upload CNIC to reach Tier 2"          if current_user.verification_tier < 2 else
             "Complete liveness check for Tier 3"   if current_user.verification_tier < 3 else

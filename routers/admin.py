@@ -242,14 +242,17 @@ _KYC_TIER_LIMITS = {2: 100_000, 3: 500_000, 4: 2_000_000}
 @router.get("/kyc-reviews")
 async def list_kyc_reviews(
     status: Optional[str] = "pending",
+    review_type: Optional[str] = None,   # "cnic" | "liveness" | None (all)
     page: int = 1, per_page: int = 20,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """List CNIC review requests with AI-extracted data + signed document URLs."""
+    """List CNIC and liveness review requests with AI-extracted data + signed document URLs."""
     q = select(KycReviewRequest).order_by(KycReviewRequest.submitted_at.desc())
     if status:
         q = q.where(KycReviewRequest.status == status)
+    if review_type:
+        q = q.where(KycReviewRequest.review_type == review_type)
     q = q.offset((page - 1) * per_page).limit(per_page)
     reviews = (await db.execute(q)).scalars().all()
 
@@ -269,8 +272,16 @@ async def list_kyc_reviews(
             if back_doc:
                 back_url = get_signed_url(back_doc.cloudinary_public_id)
 
+        # Build selfie URL for liveness reviews
+        selfie_url = None
+        if r.selfie_doc_id:
+            selfie_doc = (await db.execute(select(Document).where(Document.id == r.selfie_doc_id))).scalar_one_or_none()
+            if selfie_doc:
+                selfie_url = get_signed_url(selfie_doc.cloudinary_public_id)
+
         result.append({
             "id":               str(r.id),
+            "review_type":      r.review_type or "cnic",
             "user_id":          str(r.user_id),
             "user_name":        user.full_name if user else None,
             "user_phone":       user.phone_number if user else None,
@@ -282,8 +293,10 @@ async def list_kyc_reviews(
             "extracted_father": r.extracted_father,
             "extracted_address": r.extracted_address,
             "cnic_masked":      r.cnic_masked,
+            "face_confidence":  r.face_confidence,
             "front_image_url":  front_url,
             "back_image_url":   back_url,
+            "selfie_url":       selfie_url,
             "rejection_reason": r.rejection_reason,
             "submitted_at":     r.submitted_at.isoformat() if r.submitted_at else None,
             "reviewed_at":      r.reviewed_at.isoformat() if r.reviewed_at else None,
@@ -308,7 +321,7 @@ async def approve_kyc_review(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Approve a CNIC review request → upgrade user to Tier 2."""
+    """Approve a CNIC (→ Tier 2) or Liveness (→ Tier 3) review request."""
     review = (await db.execute(select(KycReviewRequest).where(KycReviewRequest.id == review_id))).scalar_one_or_none()
     if not review:
         raise HTTPException(404, "Review request not found.")
@@ -319,31 +332,49 @@ async def approve_kyc_review(
     if not user:
         raise HTTPException(404, "User not found.")
 
+    wallet = (await db.execute(select(Wallet).where(Wallet.user_id == user.id))).scalar_one_or_none()
+
     # Update review
     review.status      = "approved"
     review.reviewed_by = admin.id
     review.reviewed_at = _utcnow()
 
-    # Update user — store encrypted CNIC, mark verified, bump tier
-    user.cnic_encrypted     = review.cnic_encrypted
-    user.cnic_number        = review.extracted_cnic
-    user.cnic_number_masked = review.cnic_masked
-    user.cnic_verified      = True
-    user.verification_tier  = max(user.verification_tier or 0, 2)
+    rtype = review.review_type or "cnic"
 
-    # Update wallet daily limit
-    wallet = (await db.execute(select(Wallet).where(Wallet.user_id == user.id))).scalar_one_or_none()
-    if wallet:
-        wallet.daily_limit = _KYC_TIER_LIMITS.get(2, wallet.daily_limit)
-
-    await db.commit()
-
-    await log_admin_action(db, admin.id, "approve_kyc_review", user.id, "user",
-                           body.reason or "CNIC review approved", {"review_id": str(review_id)})
-    await send_notification(db, user.id, "KYC Approved ✅",
-                            "Your CNIC has been verified. Tier 2 unlocked — PKR 1,00,000/day limit.", "system")
-
-    return {"message": "CNIC approved. User upgraded to Tier 2.", "review_id": str(review_id), "user_id": str(user.id)}
+    if rtype == "liveness":
+        # Liveness approval → Tier 3
+        user.biometric_verified = True
+        user.verification_tier  = max(user.verification_tier or 0, 3)
+        if wallet:
+            wallet.daily_limit = _KYC_TIER_LIMITS.get(3, wallet.daily_limit)
+        await db.commit()
+        await log_admin_action(db, admin.id, "approve_liveness_review", user.id, "user",
+                               body.reason or "Liveness review approved", {"review_id": str(review_id)})
+        await send_notification(
+            db, user.id, "Liveness Verified ✅",
+            "Your face verification has been approved. Tier 3 unlocked — PKR 5,00,000/day limit.",
+            "system"
+        )
+        return {
+            "message": "Liveness approved. User upgraded to Tier 3.",
+            "review_id": str(review_id),
+            "user_id": str(user.id),
+        }
+    else:
+        # CNIC approval → Tier 2 (original logic)
+        user.cnic_encrypted     = review.cnic_encrypted
+        user.cnic_number        = review.extracted_cnic
+        user.cnic_number_masked = review.cnic_masked
+        user.cnic_verified      = True
+        user.verification_tier  = max(user.verification_tier or 0, 2)
+        if wallet:
+            wallet.daily_limit = _KYC_TIER_LIMITS.get(2, wallet.daily_limit)
+        await db.commit()
+        await log_admin_action(db, admin.id, "approve_kyc_review", user.id, "user",
+                               body.reason or "CNIC review approved", {"review_id": str(review_id)})
+        await send_notification(db, user.id, "KYC Approved ✅",
+                                "Your CNIC has been verified. Tier 2 unlocked — PKR 1,00,000/day limit.", "system")
+        return {"message": "CNIC approved. User upgraded to Tier 2.", "review_id": str(review_id), "user_id": str(user.id)}
 
 
 @router.post("/kyc-reviews/{review_id}/reject")
