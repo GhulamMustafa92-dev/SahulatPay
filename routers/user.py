@@ -356,10 +356,21 @@ async def search_users(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PUT /users/fcm-token
+# PUT /users/fcm-token  AND  /users/me/fcm-token  (Android app uses /me/)
 # ══════════════════════════════════════════════════════════════════════════════
 class FcmTokenRequest(BaseModel):
     fcm_token: str = Field(..., min_length=10)
+
+
+async def _do_update_fcm_token(
+    body: FcmTokenRequest,
+    current_user: User,
+    db: AsyncSession,
+):
+    current_user.fcm_token            = body.fcm_token
+    current_user.fcm_token_updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {"message": "FCM token updated. Push notifications active."}
 
 
 @router.put("/fcm-token")
@@ -368,10 +379,16 @@ async def update_fcm_token(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    current_user.fcm_token            = body.fcm_token
-    current_user.fcm_token_updated_at = datetime.now(timezone.utc)
-    await db.commit()
-    return {"message": "FCM token updated. Push notifications active."}
+    return await _do_update_fcm_token(body, current_user, db)
+
+
+@router.put("/me/fcm-token")
+async def update_fcm_token_me(
+    body: FcmTokenRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _do_update_fcm_token(body, current_user, db)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
