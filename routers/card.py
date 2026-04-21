@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_db
 from limiter import limiter
+from services.notification_service import send_notification
 from models.card import VirtualCard, CardSubscription
 from models.transaction import Transaction
 from models.user import User
@@ -199,6 +200,14 @@ async def issue_card(
     db.add(card)
     await db.commit()
     await db.refresh(card)
+    import asyncio
+    card_label = "Virtual" if body.card_type == "virtual" else "Physical"
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"💳 {card_label} Card Requested",
+        body=f"Your {body.card_network.upper()} card request has been submitted and is pending admin approval.",
+        type="system",
+    ))
     return _card_to_response(card)
 
 
@@ -293,6 +302,13 @@ async def freeze_card(
     card.is_frozen = True
     card.status    = "frozen"
     await db.commit()
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="❄️ Card Frozen",
+        body=f"Your card ending ****{card.last_four} has been frozen. Unfreeze anytime in the app.",
+        type="security",
+    ))
     return MessageResponse(message="Card frozen successfully")
 
 
@@ -308,6 +324,13 @@ async def unfreeze_card(
     card.is_frozen = False
     card.status    = "active"
     await db.commit()
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="✅ Card Unfrozen",
+        body=f"Your card ending ****{card.last_four} is active again.",
+        type="security",
+    ))
     return MessageResponse(message="Card unfrozen successfully")
 
 
@@ -329,6 +352,13 @@ async def block_card(
     card.is_frozen = True
     card.status    = "blocked"
     await db.commit()
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="🚫 Card Permanently Blocked",
+        body=f"Card ending ****{card.last_four} has been permanently blocked. Issue a new card if needed.",
+        type="security",
+    ))
     return MessageResponse(message="Card permanently blocked. Issue a new card if needed.")
 
 
@@ -369,6 +399,13 @@ async def replace_card(
     db.add(new_card)
     await db.commit()
     await db.refresh(new_card)
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="🔄 Card Replaced",
+        body=f"Your new {old_card.card_network.upper()} card ending ****{new_card.last_four} is ready.",
+        type="system",
+    ))
     return _card_to_response(new_card)
 
 
@@ -426,6 +463,13 @@ async def change_card_pin(
         raise HTTPException(status_code=401, detail="Old card PIN is incorrect")
     card.pin_hash = _hash_pin(body.new_pin)
     await db.commit()
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="🔐 Card PIN Changed",
+        body=f"PIN for your card ending ****{card.last_four} was updated successfully.",
+        type="security",
+    ))
     return MessageResponse(message="Card PIN updated successfully")
 
 
@@ -486,6 +530,13 @@ async def card_pay(
             "pending_tx_token": result["pending_tx_token"],
         }
 
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"💳 Card Payment — PKR {body.amount:,.2f}",
+        body=f"Paid to {body.merchant_name} using card ****{card.last_four}. Ref: {result['reference_number']}",
+        type="transaction", data={"reference": result["reference_number"]},
+    ))
     return {
         "status":           "completed",
         "message":          f"Payment of PKR {body.amount:,.2f} to {body.merchant_name} successful",
@@ -543,6 +594,13 @@ async def atm_withdraw(
     await db.commit()
     await db.refresh(wallet)
 
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"🏧 ATM Withdrawal — PKR {body.amount:,.2f}",
+        body=f"Withdrawn from card ****{card.last_four}. New balance: PKR {wallet.balance:,.2f}",
+        type="transaction", data={"reference": ref},
+    ))
     return {
         "status":           "completed",
         "message":          f"PKR {body.amount:,.2f} withdrawn via ATM",

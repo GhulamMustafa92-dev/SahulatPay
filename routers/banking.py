@@ -17,6 +17,7 @@ from services.auth_service import (
     generate_otp, hash_otp, verify_otp, send_otp_sms,
 )
 from services.encryption_service import encrypt, mask_account
+from services.notification_service import send_notification
 
 router = APIRouter()
 
@@ -178,6 +179,13 @@ async def link_bank_account(
     await db.commit()
     await db.refresh(account)
 
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="🏦 Bank Account Linked",
+        body=f"{body.bank_name} account {masked} linked successfully.",
+        type="security",
+    ))
     return {
         "message":               "Bank account linked successfully.",
         "id":                    account.id,

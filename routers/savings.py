@@ -16,6 +16,7 @@ from models.transaction import Transaction
 from models.savings import SavingGoal
 from services.auth_service import get_current_user
 from services.wallet_service import generate_reference, _send_fcm
+from services.notification_service import send_notification
 from services.platform_ledger import ledger_credit, ledger_debit, make_idem_key
 from schemas.savings import (
     SavingGoalCreate, SavingGoalResponse, SavingGoalListResponse,
@@ -207,13 +208,21 @@ async def deposit_to_goal(
         await db.refresh(goal)
         await db.refresh(wallet)
         import asyncio
-        asyncio.create_task(_send_fcm(
-            current_user.fcm_token or "",
-            title="🎉 Goal Achieved!",
-            body=f'Congratulations! Your "{goal.goal_name}" goal is complete!',
+        asyncio.create_task(send_notification(
+            db, current_user.id,
+            title="🎉 Savings Goal Achieved!",
+            body=f'Congratulations! Your "{goal.goal_name}" goal of PKR {goal.target_amount:,.2f} is complete!',
+            type="system",
         ))
         return _to_response(goal)
 
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"💰 Savings Deposit — PKR {body.amount:,.2f}",
+        body=f"Deposited to \"{goal.goal_name}\". Progress: PKR {goal.saved_amount:,.2f} / {goal.target_amount:,.2f}",
+        type="transaction",
+    ))
     await db.commit()
     await db.refresh(goal)
     return _to_response(goal)

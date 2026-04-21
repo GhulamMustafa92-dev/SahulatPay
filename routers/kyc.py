@@ -18,6 +18,7 @@ from models.kyc import Document, FingerprintScan, BusinessProfile, KycReviewRequ
 from models.user import User
 from models.wallet import Wallet
 from services.auth_service import get_current_user
+from services.notification_service import send_notification
 from services.kyc_service import (
     upload_kyc_document,
     ocr_extract_text,
@@ -220,6 +221,13 @@ async def upload_cnic(
     db.add(review)
     await db.commit()
 
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="📎 CNIC Submitted for Review",
+        body="Your CNIC has been scanned by AI and submitted to admin for approval. You will be notified once verified.",
+        type="system",
+    ))
+
     return {
         "status":       "pending_review",
         "tier":         current_user.verification_tier,
@@ -324,6 +332,13 @@ async def verify_liveness(
     )
     db.add(review)
     await db.commit()
+
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="🤵 Liveness Check Submitted",
+        body=f"Face match {confidence:.1f}% confirmed. Your liveness review is pending admin approval. You will be notified once Tier 3 is unlocked.",
+        type="system",
+    ))
 
     return {
         "status":      "pending_review",

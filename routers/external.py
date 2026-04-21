@@ -15,6 +15,7 @@ from models.transaction import Transaction
 from services.auth_service import get_current_user
 from services.wallet_service import generate_reference
 from services.platform_ledger import ledger_credit, make_idem_key
+from services.notification_service import send_notification
 
 router = APIRouter()
 
@@ -130,6 +131,13 @@ async def ext_wallet_send(
         )
     finally:
         mdb.close()
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"💸 PKR {body.amount:,.2f} Sent",
+        body=f"Sent to {body.provider} {body.phone}. Ref: {ref}",
+        type="transaction", data={"reference": ref},
+    ))
     return {
         "status":        "completed",
         "reference":     ref,
@@ -205,6 +213,13 @@ async def ibft_send(
         body.description or f"IBFT to {body.account_title} at {body.bank_code.upper()}",
         {"bank_code": body.bank_code, "account_number": body.account_number, "account_title": body.account_title},
     )
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"🏦 IBFT Sent — PKR {body.amount:,.2f}",
+        body=f"Transferred to {body.account_title} ({body.bank_code.upper()}). Ref: {ref}",
+        type="transaction", data={"reference": ref},
+    ))
     return {**mock_result, "reference": ref, "new_balance": str(wallet.balance)}
 
 
@@ -224,6 +239,13 @@ async def raast_send(
         body.description or f"Raast to {body.raast_id}",
         {"raast_id": body.raast_id, "method": "raast"},
     )
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"⚡ Raast Sent — PKR {body.amount:,.2f}",
+        body=f"Instant transfer to {body.raast_id}. Ref: {ref}",
+        type="transaction", data={"reference": ref},
+    ))
     return {
         "status":     "completed",
         "reference":  ref,
@@ -301,6 +323,13 @@ async def pay_bill(
         raise HTTPException(502, f"Bill payment failed: {e}")
     finally:
         mdb.close()
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"✅ Bill Paid — {body.company.upper()}",
+        body=f"PKR {body.amount:,.2f} paid for consumer ID {body.consumer_id}. Ref: {ref}",
+        type="transaction", data={"reference": ref},
+    ))
     return {"status": "completed", "reference": ref, "new_balance": str(wallet.balance), "message": f"Bill paid for {body.company.upper()} {body.consumer_id}"}
 
 
@@ -342,6 +371,13 @@ async def pay_challan(
         raise HTTPException(502, f"Challan payment failed: {e}")
     finally:
         mdb.close()
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="✅ Challan Paid",
+        body=f"PKR {body.amount:,.2f} paid for PSID {body.psid}. Ref: {ref}",
+        type="transaction", data={"reference": ref},
+    ))
     return {"status": "completed", "reference": ref, "new_balance": str(wallet.balance)}
 
 
@@ -403,6 +439,13 @@ async def intl_send(
         ), db=mdb)
     finally:
         mdb.close()
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title=f"🌍 International Transfer Sent",
+        body=f"PKR {body.amount_pkr:,.2f} sent to {body.receiver_name} ({body.country}) via {body.provider}. Ref: {ref}",
+        type="transaction", data={"reference": ref},
+    ))
     return {**result, "new_balance": str(wallet.balance)}
 
 
@@ -451,6 +494,13 @@ async def insurance_pay(
         f"Insurance premium — policy {body.policy_number}",
         {"policy_number": body.policy_number},
     )
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, current_user.id,
+        title="🛡️ Insurance Premium Paid",
+        body=f"PKR {body.amount:,.2f} paid for policy {body.policy_number}. Ref: {ref}",
+        type="transaction", data={"reference": ref},
+    ))
     return {"status": "completed", "reference": ref, "policy_number": body.policy_number,
             "amount": body.amount, "new_balance": str(wallet.balance)}
 
@@ -539,6 +589,14 @@ async def stock_order(
             result["new_balance"] = str(wallet_obj.balance)
         else:
             result["new_balance"] = str(wallet.balance)
+        import asyncio
+        action_word = "sold" if body.order_type == "sell" else "purchased"
+        asyncio.create_task(send_notification(
+            db, current_user.id,
+            title=f"📈 Stock {action_word.capitalize()}: {body.symbol.upper()}",
+            body=f"{body.units} units of {body.symbol.upper()} {action_word} @ PKR {total:,.2f}",
+            type="transaction",
+        ))
         return result
     finally:
         mdb.close()
@@ -598,6 +656,14 @@ async def fund_order(
             result["new_balance"] = str(wallet_obj.balance)
         else:
             result["new_balance"] = str(wallet.balance)
+        import asyncio
+        action_word = "redeemed" if body.order_type == "sell" else "invested"
+        asyncio.create_task(send_notification(
+            db, current_user.id,
+            title=f"💼 Mutual Fund {action_word.capitalize()}: {body.fund_code}",
+            body=f"PKR {body.amount_pkr:,.2f} {action_word} in {body.fund_code}",
+            type="transaction",
+        ))
         return result
     finally:
         mdb.close()

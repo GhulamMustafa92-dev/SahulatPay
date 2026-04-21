@@ -15,6 +15,7 @@ from models.social import BillSplit, SplitParticipant, TrustedCircle
 from models.user import User
 from services.auth_service import get_current_user, normalize_phone
 from services.wallet_service import doTransfer, _send_fcm
+from services.notification_service import send_notification
 
 router = APIRouter()
 
@@ -119,10 +120,11 @@ async def create_split(
             "status":    "pending",
         })
         notification_tasks.append(
-            _send_fcm(
-                user.fcm_token or "",
+            send_notification(
+                db, user.id,
                 title=f"💸 Split Request from {current_user.full_name}",
                 body=f'"{body.title}" — Your share: PKR {amount:,.2f}. Tap to pay.',
+                type="transaction",
             )
         )
 
@@ -257,14 +259,13 @@ async def respond_to_split(
         part.status      = "declined"
         part.declined_at = _utcnow()
         await db.commit()
-        creator = (await db.execute(select(User).where(User.id == split.creator_id))).scalar_one_or_none()
-        if creator:
-            import asyncio
-            asyncio.create_task(_send_fcm(
-                creator.fcm_token or "",
-                title="Split Declined",
-                body=f"{current_user.full_name} declined their share in '{split.title}'.",
-            ))
+        import asyncio
+        asyncio.create_task(send_notification(
+            db, split.creator_id,
+            title="❌ Split Declined",
+            body=f"{current_user.full_name} declined their share in '{split.title}'.",
+            type="alert",
+        ))
         return {"status": "declined", "message": "You have declined this split request."}
 
     # Accept → transfer money from participant to creator
@@ -292,6 +293,14 @@ async def respond_to_split(
     part.status  = "paid"
     part.paid_at = _utcnow()
     await db.commit()
+
+    import asyncio
+    asyncio.create_task(send_notification(
+        db, split.creator_id,
+        title=f"✅ Split Payment Received",
+        body=f"{current_user.full_name} paid PKR {part.amount:,.2f} for '{split.title}'.",
+        type="transaction",
+    ))
 
     # Check if all paid → mark split completed
     all_parts = (await db.execute(
