@@ -211,3 +211,6 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 
 from routers import gold
 app.include_router(gold.router, prefix="/api/v1/gold", tags=["Gold & Silver"])
+
+from routers import topup
+app.include_router(topup.router, prefix="/api/v1/topup", tags=["TopUp"])

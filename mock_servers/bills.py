@@ -71,9 +71,11 @@ def list_companies():
 def fetch_bill(body: BillFetchRequest, db: Session = Depends(get_db)):
     if body.company not in UTILITY_COMPANIES:
         raise HTTPException(400, f"Unknown company: {body.company}")
-    bill = db.query(MockBill).filter_by(company=body.company, consumer_id=body.consumer_id, is_paid=False).first()
+    bill = db.query(MockBill).filter_by(company=body.company, consumer_id=body.consumer_id).first()
     if not bill:
-        raise HTTPException(404, f"No unpaid bill found for consumer ID {body.consumer_id} at {UTILITY_COMPANIES[body.company]}")
+        raise HTTPException(404, f"No bill found for consumer ID {body.consumer_id} at {UTILITY_COMPANIES[body.company]}")
+    if bill.is_paid:
+        raise HTTPException(400, f"This bill for {UTILITY_COMPANIES[body.company]} has already been paid.")
     return {
         "found":         True,
         "company":       UTILITY_COMPANIES[body.company],
@@ -94,7 +96,7 @@ def pay_bill(body: BillPayRequest, db: Session = Depends(get_db)):
     bill = db.query(MockBill).filter_by(company=body.company, consumer_id=body.consumer_id, is_paid=False).first()
     if bill:
         bill.is_paid = True
-        db.commit()
+        db.flush()
     return {
         "success":     True,
         "reference":   "BILL" + secrets.token_hex(5).upper(),
@@ -109,9 +111,11 @@ def pay_bill(body: BillPayRequest, db: Session = Depends(get_db)):
 # ── POST /mock/challan/fetch ──────────────────────────────────────────────────
 @router.post("/challan/fetch")
 def fetch_challan(body: ChallanFetchRequest, db: Session = Depends(get_db)):
-    challan = db.query(MockChallan).filter_by(psid=body.psid, is_paid=False).first()
+    challan = db.query(MockChallan).filter_by(psid=body.psid).first()
     if not challan:
-        raise HTTPException(404, f"No unpaid challan found for PSID {body.psid}")
+        raise HTTPException(404, f"No challan found for PSID {body.psid}")
+    if challan.is_paid:
+        raise HTTPException(400, "This Government challan has already been paid.")
     return {
         "found":       True,
         "psid":        body.psid,
@@ -130,7 +134,7 @@ def pay_challan(body: ChallanPayRequest, db: Session = Depends(get_db)):
     challan = db.query(MockChallan).filter_by(psid=body.psid).first()
     if challan:
         challan.is_paid = True
-        db.commit()
+        db.flush()
     return {
         "success":   True,
         "reference": "CHAL" + secrets.token_hex(5).upper(),

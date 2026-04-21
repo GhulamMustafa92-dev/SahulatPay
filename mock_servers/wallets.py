@@ -54,6 +54,7 @@ def lookup_wallet(provider: str, phone: str, db: Session = Depends(get_db)):
         "found":       True,
         "provider":    PROVIDERS[provider],
         "phone":       phone,
+        "name":        account.name,
         "masked_name": _mask_name(account.name),
         "is_active":   account.is_active,
     }
@@ -72,7 +73,7 @@ def send_to_wallet(body: WalletSendRequest, db: Session = Depends(get_db)):
         )
         db.add(account)
     account.balance += body.amount
-    db.commit()
+    db.flush()   # stage the change; caller commits
     ref = _mock_ref()
     return {
         "success":      True,

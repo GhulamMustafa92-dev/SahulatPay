@@ -84,13 +84,7 @@ def lookup_bank_account(body: BankLookupRequest, db: Session = Depends(get_db)):
 def ibft_send(body: IBFTSendRequest, db: Session = Depends(get_db)):
     if body.bank_code not in BANKS:
         raise HTTPException(400, f"Unknown bank code: {body.bank_code}")
-    account = db.query(MockBankAccount).filter_by(
-        bank_code=body.bank_code, account_number=body.account_number
-    ).first()
-    if account:
-        account.balance += body.amount
-        db.commit()
-    # Simulate ~10% failure
+    # Simulate ~10% failure BEFORE touching balance
     if random.random() < 0.10:
         return {
             "success":   False,
@@ -98,6 +92,12 @@ def ibft_send(body: IBFTSendRequest, db: Session = Depends(get_db)):
             "status":    "failed",
             "message":   "Transaction failed — recipient bank temporarily unavailable. Amount will be refunded within 2 hours.",
         }
+    account = db.query(MockBankAccount).filter_by(
+        bank_code=body.bank_code, account_number=body.account_number
+    ).first()
+    if account:
+        account.balance += body.amount
+        db.flush()   # stage the change; caller commits
     return {
         "success":        True,
         "reference":      _ref(),

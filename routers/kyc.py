@@ -1,6 +1,7 @@
 """KYC router — CNIC upload, liveness check, fingerprint, business docs. PROMPT 08."""
 import asyncio
 import hashlib
+import re
 from datetime import datetime, timezone
 from typing import List
 from uuid import UUID
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from config import settings
 from database import get_db
 from limiter import limiter
-from models.kyc import Document, FingerprintScan, BusinessProfile
+from models.kyc import Document, FingerprintScan, BusinessProfile, KycReviewRequest
 from models.user import User
 from models.wallet import Wallet
 from services.auth_service import get_current_user
@@ -30,6 +31,33 @@ from services.kyc_service import (
 router = APIRouter()
 
 _TIER_LIMITS = {2: 100_000, 3: 500_000, 4: 2_000_000}
+
+
+# ── Credential-match helpers ──────────────────────────────────────────────────
+
+def _normalize_name(name: str) -> str:
+    """Lowercase, collapse whitespace, strip punctuation for comparison."""
+    name = re.sub(r"[^\w\s]", "", name.lower())
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _names_match(registered: str, extracted: str) -> bool:
+    """True if every word in the registered name appears in the extracted name."""
+    reg = _normalize_name(registered)
+    ext = _normalize_name(extracted)
+    if not reg or not ext:
+        return True          # nothing to compare — give benefit of doubt
+    if reg == ext:
+        return True
+    reg_words = set(reg.split())
+    ext_words = set(ext.split())
+    # All registered words must appear in extracted text
+    return reg_words.issubset(ext_words)
+
+
+def _cnic_digits(cnic: str) -> str:
+    """Strip dashes and whitespace — 13 digit string."""
+    return re.sub(r"[\s\-]", "", cnic.strip())
 
 MAX_FILE_MB   = 10
 MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024
@@ -67,69 +95,143 @@ async def upload_cnic(
 ):
     """
     Upload CNIC front + back → Cloudinary (private) → OCR → DeepSeek extract
-    → Fernet encrypt CNIC → Tier 2 upgrade.
+    → credential match → create admin review request (pending approval).
     """
     if current_user.verification_tier >= 2:
-        return {"message": "CNIC already verified. Tier 2+ active.", "tier": current_user.verification_tier}
+        return {
+            "status":      "already_verified",
+            "tier":        current_user.verification_tier,
+            "daily_limit": _TIER_LIMITS.get(current_user.verification_tier, 0),
+            "cnic_masked": current_user.cnic_number_masked,
+            "extracted":   None,
+            "message":     "CNIC already verified. Tier 2+ active.",
+        }
+
+    # Check if there's already a pending review
+    existing = (await db.execute(
+        select(KycReviewRequest).where(
+            KycReviewRequest.user_id == current_user.id,
+            KycReviewRequest.status == "pending",
+        )
+    )).scalar_one_or_none()
+    if existing:
+        return {
+            "status":      "pending_review",
+            "tier":        current_user.verification_tier,
+            "daily_limit": _TIER_LIMITS.get(current_user.verification_tier, 0),
+            "cnic_masked": existing.cnic_masked,
+            "extracted":   {
+                "full_name":   existing.extracted_name,
+                "dob":         existing.extracted_dob,
+                "address":     existing.extracted_address,
+                "father_name": existing.extracted_father,
+            },
+            "message":     "Your CNIC is already under review. You will be notified once approved.",
+        }
 
     front_bytes = await front.read()
     back_bytes  = await back.read()
     _check_file_size(front_bytes, "Front image")
     _check_file_size(back_bytes,  "Back image")
 
-    # 1 — Upload both to Cloudinary (parallel)
-    front_pub_id, back_pub_id = await asyncio.gather(
-        upload_kyc_document(front_bytes, current_user.id, "cnic_front"),
-        upload_kyc_document(back_bytes,  current_user.id, "cnic_back"),
+    # 1 — Upload to Cloudinary AND run OCR simultaneously
+    (front_pub_id, back_pub_id), raw_ocr = await asyncio.gather(
+        asyncio.gather(
+            upload_kyc_document(front_bytes, current_user.id, "cnic_front"),
+            upload_kyc_document(back_bytes,  current_user.id, "cnic_back"),
+        ),
+        ocr_extract_text(front_bytes),
     )
 
-    # 2 — OCR on front image
-    raw_ocr = await ocr_extract_text(front_bytes)
+    # 2 — Guard: OCR must return some text
+    if not raw_ocr or not raw_ocr.strip():
+        raise HTTPException(
+            422,
+            "OCR could not read text from your CNIC image. "
+            "Please retake the photo with better lighting and no glare.",
+        )
 
-    # 3 — DeepSeek extract structured fields
+    # 3 — DeepSeek: format + extract structured fields from raw OCR text
     cnic_data = await deepseek_extract_cnic(raw_ocr)
 
-    # 4 — Validate extracted CNIC number
-    extracted_cnic = cnic_data.get("cnic_number") or current_user.cnic_number
-    if not extracted_cnic:
-        raise HTTPException(422, "Could not extract CNIC number from document. Please upload a clearer image.")
-
-    # 5 — Fernet encrypt CNIC
-    encrypted_cnic = encrypt_value(extracted_cnic)
-
-    # 6 — Save Document records
-    for pub_id, dtype in [(front_pub_id, "cnic_front"), (back_pub_id, "cnic_back")]:
-        doc = Document(
-            user_id=current_user.id,
-            document_type=dtype,
-            cloudinary_public_id=pub_id,
+    # 4 — Guard: DeepSeek must return a CNIC number at minimum
+    if not cnic_data or not cnic_data.get("cnic_number"):
+        raise HTTPException(
+            422,
+            "AI could not extract CNIC details from the document. "
+            "Please ensure your CNIC is clearly visible and retake the photo.",
         )
-        db.add(doc)
 
-    # 7 — Update user
-    current_user.cnic_encrypted       = encrypted_cnic
-    current_user.cnic_number          = extracted_cnic
-    current_user.cnic_number_masked   = extracted_cnic[:6] + "XXXXXXX-X" if extracted_cnic else None
-    current_user.cnic_verified        = True
-    if cnic_data.get("full_name"):
-        pass   # keep registered name, do not overwrite
+    # 5 — Pull extracted values
+    extracted_cnic = cnic_data.get("cnic_number") or ""
+    extracted_name = cnic_data.get("full_name")  or ""
 
-    # 8 — Tier upgrade
-    wallet = (await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))).scalar_one_or_none()
-    await _bump_tier(current_user, wallet, 2, db)
+    # 6a — Validate CNIC number matches account (if user registered with one)
+    if current_user.cnic_number:
+        reg_digits = _cnic_digits(current_user.cnic_number)
+        ext_digits = _cnic_digits(extracted_cnic)
+        if reg_digits and ext_digits and reg_digits != ext_digits:
+            raise HTTPException(
+                422,
+                "CNIC number on the uploaded document does not match your account. "
+                "Please upload your own CNIC.",
+            )
+
+    # 6b — Validate name matches account
+    if extracted_name and not _names_match(current_user.full_name, extracted_name):
+        raise HTTPException(
+            422,
+            f"Name on CNIC (\'{extracted_name}\') does not match your account name "
+            f"(\'{current_user.full_name}\'). Please upload a CNIC that matches your registered name.",
+        )
+
+    final_cnic = extracted_cnic or current_user.cnic_number
+    if not final_cnic:
+        raise HTTPException(
+            422,
+            "Could not determine CNIC number. Please upload a clearer image.",
+        )
+
+    # 7 — Fernet encrypt CNIC
+    encrypted_cnic = encrypt_value(final_cnic)
+    cnic_masked = final_cnic[:6] + "*******-*" if len(final_cnic) >= 6 else final_cnic
+
+    # 8 — Save Document records and get their IDs
+    front_doc = Document(user_id=current_user.id, document_type="cnic_front", cloudinary_public_id=front_pub_id)
+    back_doc  = Document(user_id=current_user.id, document_type="cnic_back",  cloudinary_public_id=back_pub_id)
+    db.add(front_doc)
+    db.add(back_doc)
+    await db.flush()   # assigns UUIDs
+
+    # 9 — Create admin review request (NOT auto-upgrading)
+    review = KycReviewRequest(
+        user_id           = current_user.id,
+        front_doc_id      = front_doc.id,
+        back_doc_id       = back_doc.id,
+        extracted_cnic    = final_cnic,
+        extracted_name    = extracted_name,
+        extracted_dob     = cnic_data.get("dob"),
+        extracted_father  = cnic_data.get("father_name"),
+        extracted_address = cnic_data.get("address"),
+        cnic_masked       = cnic_masked,
+        cnic_encrypted    = encrypted_cnic,
+        status            = "pending",
+    )
+    db.add(review)
+    await db.commit()
 
     return {
-        "status":       "verified",
+        "status":       "pending_review",
         "tier":         current_user.verification_tier,
-        "daily_limit":  _TIER_LIMITS[2],
-        "cnic_masked":  current_user.cnic_number_masked,
+        "daily_limit":  _TIER_LIMITS.get(current_user.verification_tier, 0),
+        "cnic_masked":  cnic_masked,
         "extracted":    {
             "full_name":   cnic_data.get("full_name"),
             "dob":         cnic_data.get("dob"),
             "address":     cnic_data.get("address"),
             "father_name": cnic_data.get("father_name"),
         },
-        "message": "CNIC verified. Tier 2 unlocked — PKR 1,00,000/day limit.",
+        "message": "CNIC verified by AI. Your request is now pending admin approval.",
     }
 
 
@@ -367,12 +469,32 @@ async def kyc_status(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Quick summary of user's KYC tier and verification flags."""
+    """Quick summary of user's KYC tier and verification flags + pending review."""
     business = (await db.execute(
         select(BusinessProfile).where(BusinessProfile.user_id == current_user.id)
     )).scalar_one_or_none()
 
     wallet = (await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))).scalar_one_or_none()
+
+    # Check for pending or latest CNIC review
+    latest_review = (await db.execute(
+        select(KycReviewRequest)
+        .where(KycReviewRequest.user_id == current_user.id)
+        .order_by(KycReviewRequest.submitted_at.desc())
+    )).scalar_one_or_none()
+
+    cnic_review = None
+    if latest_review:
+        cnic_review = {
+            "id":              str(latest_review.id),
+            "status":          latest_review.status,
+            "extracted_name":  latest_review.extracted_name,
+            "extracted_cnic":  latest_review.cnic_masked,
+            "extracted_dob":   latest_review.extracted_dob,
+            "rejection_reason": latest_review.rejection_reason,
+            "submitted_at":    latest_review.submitted_at.isoformat() if latest_review.submitted_at else None,
+            "reviewed_at":     latest_review.reviewed_at.isoformat() if latest_review.reviewed_at else None,
+        }
 
     return {
         "tier":                 current_user.verification_tier,
@@ -383,6 +505,7 @@ async def kyc_status(
         "fingerprint_verified": current_user.fingerprint_verified,
         "nadra_verified":       current_user.nadra_verified,
         "business_status":      business.verification_status if business else None,
+        "cnic_review":          cnic_review,
         "next_step": (
             "Upload CNIC to reach Tier 2"          if current_user.verification_tier < 2 else
             "Complete liveness check for Tier 3"   if current_user.verification_tier < 3 else

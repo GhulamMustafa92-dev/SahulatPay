@@ -111,7 +111,23 @@ async def ext_wallet_send(
     from mock_servers.db import SessionLocal
     mdb = SessionLocal()
     try:
-        send_to_wallet(WalletSendRequest(provider=body.provider, phone=body.phone, amount=float(body.amount)), db=mdb)
+        send_to_wallet(
+            WalletSendRequest(
+                provider=body.provider,
+                phone=body.phone,
+                amount=float(body.amount),
+                description=body.description,
+            ),
+            db=mdb,
+        )
+        mdb.commit()
+    except Exception as e:
+        mdb.rollback()
+        # Balance already deducted — log and continue; do NOT raise so user gets success
+        import logging
+        logging.getLogger(__name__).warning(
+            f"[ext_wallet_send] mock send failed (balance already deducted): {e}"
+        )
     finally:
         mdb.close()
     return {
@@ -175,6 +191,10 @@ async def ibft_send(
         mock_result = mock_ibft(IBFTSendRequest(
             bank_code=body.bank_code, account_number=body.account_number,
             account_title=body.account_title, amount=float(body.amount)), db=mdb)
+        mdb.commit()
+    except Exception as e:
+        mdb.rollback()
+        raise HTTPException(502, f"Bank transfer failed: {e}")
     finally:
         mdb.close()
     if not mock_result.get("success"):
@@ -275,6 +295,10 @@ async def pay_bill(
     mdb = SessionLocal()
     try:
         mock_pay(BillPayRequest(company=body.company, consumer_id=body.consumer_id, amount=float(body.amount)), db=mdb)
+        mdb.commit()
+    except Exception as e:
+        mdb.rollback()
+        raise HTTPException(502, f"Bill payment failed: {e}")
     finally:
         mdb.close()
     return {"status": "completed", "reference": ref, "new_balance": str(wallet.balance), "message": f"Bill paid for {body.company.upper()} {body.consumer_id}"}
@@ -312,6 +336,10 @@ async def pay_challan(
     mdb = SessionLocal()
     try:
         mock_pay(ChallanPayRequest(psid=body.psid, amount=float(body.amount)), db=mdb)
+        mdb.commit()
+    except Exception as e:
+        mdb.rollback()
+        raise HTTPException(502, f"Challan payment failed: {e}")
     finally:
         mdb.close()
     return {"status": "completed", "reference": ref, "new_balance": str(wallet.balance)}

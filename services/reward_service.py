@@ -55,12 +55,12 @@ async def add_cashback(
     )
     db.add(rt)
 
-    # Update matching active offers
+    # Update matching active offers (case-insensitive category match)
     active_offers = (await db.execute(
         select(RewardOffer).where(
             RewardOffer.user_id  == user_id,
             RewardOffer.status   == "active",
-            RewardOffer.category == purpose,
+            RewardOffer.category == purpose.lower(),
             RewardOffer.expires_at > _utcnow(),
         )
     )).scalars().all()

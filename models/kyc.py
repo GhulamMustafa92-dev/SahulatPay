@@ -54,3 +54,29 @@ class BusinessProfile(Base):
     verified_at         = Column(DateTime(timezone=True))
 
     user = relationship("User", back_populates="business_profile")
+
+
+class KycReviewRequest(Base):
+    __tablename__ = "kyc_review_requests"
+
+    id                = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id           = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    front_doc_id      = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
+    back_doc_id       = Column(UUID(as_uuid=True), ForeignKey("documents.id"))
+    # AI-extracted fields
+    extracted_cnic    = Column(String(20))
+    extracted_name    = Column(String(255))
+    extracted_dob     = Column(String(30))
+    extracted_father  = Column(String(255))
+    extracted_address = Column(Text)
+    cnic_masked       = Column(String(25))
+    cnic_encrypted    = Column(Text)
+    # Review workflow
+    status            = Column(String(20), server_default="pending")   # pending | approved | rejected
+    rejection_reason  = Column(Text)
+    reviewed_by       = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    reviewed_at       = Column(DateTime(timezone=True))
+    submitted_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+    user     = relationship("User", foreign_keys=[user_id], backref="kyc_reviews")
+    reviewer = relationship("User", foreign_keys=[reviewed_by])

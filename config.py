@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     # ── STRIPE ────────────────────────────────────────────────────────────────────
     STRIPE_SECRET_KEY: str = ""
+    STRIPE_PUBLISHABLE_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
 
     # ── FIREBASE FCM ──────────────────────────────────────────────────────────────
@@ -51,7 +52,7 @@ class Settings(BaseSettings):
 
     # ── APP CONFIG ────────────────────────────────────────────────────────────
     ENVIRONMENT: str = "production"
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:5174"
     DEV_MODE: bool = False
     PORT: int = 8000                      # Railway sets this automatically
 

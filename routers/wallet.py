@@ -211,6 +211,7 @@ async def lookup_recipient(
 
     return LookupResponse(
         found=True,
+        full_name=recipient.full_name,
         masked_name=_mask_name(recipient.full_name),
         masked_phone=normalized[:6] + "****" + normalized[-2:],
         tier=tier,

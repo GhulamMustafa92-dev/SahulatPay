@@ -15,7 +15,7 @@ from limiter import limiter
 from models.ai import AiInsight, ChatSession
 from models.card import VirtualCard
 from models.finance import HighYieldDeposit, InsurancePolicy, Investment
-from models.kyc import BusinessProfile, Document
+from models.kyc import BusinessProfile, Document, KycReviewRequest
 from models.fraud import StrReport, WalletDebt
 from models.other import AdminAction, FraudFlag, Notification, ZakatCalculation
 from models.rewards import OfferTemplate, RewardOffer
@@ -234,63 +234,144 @@ async def override_tier(user_id: UUID, body: TierOverrideRequest, admin: User = 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# KYC — approve / reject + signed document URLs
+# KYC Review Requests — admin approval workflow
 # ══════════════════════════════════════════════════════════════════════════════
-@router.get("/kyc/queue")
-async def kyc_queue(
+_KYC_TIER_LIMITS = {2: 100_000, 3: 500_000, 4: 2_000_000}
+
+
+@router.get("/kyc-reviews")
+async def list_kyc_reviews(
+    status: Optional[str] = "pending",
     page: int = 1, per_page: int = 20,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    docs = (await db.execute(
-        select(Document)
-        .join(User, Document.user_id == User.id)
-        .where(User.cnic_verified == False)
-        .order_by(Document.uploaded_at).offset((page - 1) * per_page).limit(per_page)
-    )).scalars().all()
-    return {
-        "documents": [
-            {
-                "id": d.id, "user_id": d.user_id, "document_type": d.document_type,
-                "uploaded_at": d.uploaded_at.isoformat() if d.uploaded_at else None,
-                "signed_url": get_signed_url(d.cloudinary_public_id),
-            }
-            for d in docs
-        ]
-    }
+    """List CNIC review requests with AI-extracted data + signed document URLs."""
+    q = select(KycReviewRequest).order_by(KycReviewRequest.submitted_at.desc())
+    if status:
+        q = q.where(KycReviewRequest.status == status)
+    q = q.offset((page - 1) * per_page).limit(per_page)
+    reviews = (await db.execute(q)).scalars().all()
+
+    result = []
+    for r in reviews:
+        # Fetch user info
+        user = (await db.execute(select(User).where(User.id == r.user_id))).scalar_one_or_none()
+        # Build signed URLs for front/back
+        front_url = None
+        back_url  = None
+        if r.front_doc_id:
+            front_doc = (await db.execute(select(Document).where(Document.id == r.front_doc_id))).scalar_one_or_none()
+            if front_doc:
+                front_url = get_signed_url(front_doc.cloudinary_public_id)
+        if r.back_doc_id:
+            back_doc = (await db.execute(select(Document).where(Document.id == r.back_doc_id))).scalar_one_or_none()
+            if back_doc:
+                back_url = get_signed_url(back_doc.cloudinary_public_id)
+
+        result.append({
+            "id":               str(r.id),
+            "user_id":          str(r.user_id),
+            "user_name":        user.full_name if user else None,
+            "user_phone":       user.phone_number if user else None,
+            "account_cnic":     user.cnic_number if user else None,
+            "status":           r.status,
+            "extracted_cnic":   r.extracted_cnic,
+            "extracted_name":   r.extracted_name,
+            "extracted_dob":    r.extracted_dob,
+            "extracted_father": r.extracted_father,
+            "extracted_address": r.extracted_address,
+            "cnic_masked":      r.cnic_masked,
+            "front_image_url":  front_url,
+            "back_image_url":   back_url,
+            "rejection_reason": r.rejection_reason,
+            "submitted_at":     r.submitted_at.isoformat() if r.submitted_at else None,
+            "reviewed_at":      r.reviewed_at.isoformat() if r.reviewed_at else None,
+        })
+
+    total = (await db.execute(
+        select(func.count(KycReviewRequest.id)).where(KycReviewRequest.status == status) if status
+        else select(func.count(KycReviewRequest.id))
+    )).scalar() or 0
+
+    return {"reviews": result, "total": total, "page": page}
 
 
 class KycDecisionRequest(BaseModel):
     reason: str = Field(default="")
 
 
-@router.post("/kyc/{doc_id}/approve")
-async def approve_kyc(doc_id: UUID, body: KycDecisionRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
-    if not doc:
-        raise HTTPException(404, "Document not found.")
-    user = (await db.execute(select(User).where(User.id == doc.user_id))).scalar_one_or_none()
-    if user:
-        if doc.document_type in ("cnic_front", "cnic_back"):
-            user.cnic_verified = True
-            user.verification_tier = max(user.verification_tier or 0, 2)
-        elif doc.document_type == "liveness_selfie":
-            user.biometric_verified = True
-            user.verification_tier = max(user.verification_tier or 0, 3)
+@router.post("/kyc-reviews/{review_id}/approve")
+async def approve_kyc_review(
+    review_id: UUID,
+    body: KycDecisionRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Approve a CNIC review request → upgrade user to Tier 2."""
+    review = (await db.execute(select(KycReviewRequest).where(KycReviewRequest.id == review_id))).scalar_one_or_none()
+    if not review:
+        raise HTTPException(404, "Review request not found.")
+    if review.status != "pending":
+        raise HTTPException(400, f"Review already {review.status}.")
+
+    user = (await db.execute(select(User).where(User.id == review.user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(404, "User not found.")
+
+    # Update review
+    review.status      = "approved"
+    review.reviewed_by = admin.id
+    review.reviewed_at = _utcnow()
+
+    # Update user — store encrypted CNIC, mark verified, bump tier
+    user.cnic_encrypted     = review.cnic_encrypted
+    user.cnic_number        = review.extracted_cnic
+    user.cnic_number_masked = review.cnic_masked
+    user.cnic_verified      = True
+    user.verification_tier  = max(user.verification_tier or 0, 2)
+
+    # Update wallet daily limit
+    wallet = (await db.execute(select(Wallet).where(Wallet.user_id == user.id))).scalar_one_or_none()
+    if wallet:
+        wallet.daily_limit = _KYC_TIER_LIMITS.get(2, wallet.daily_limit)
+
     await db.commit()
-    await log_admin_action(db, admin.id, "approve_kyc", doc.user_id, "user", body.reason or "KYC approved", {"doc_id": str(doc_id)})
-    await send_notification(db, doc.user_id, "KYC Approved ✅", f"Your {doc.document_type.replace('_', ' ')} has been verified.", "system")
-    return {"message": "KYC document approved.", "doc_id": doc_id}
+
+    await log_admin_action(db, admin.id, "approve_kyc_review", user.id, "user",
+                           body.reason or "CNIC review approved", {"review_id": str(review_id)})
+    await send_notification(db, user.id, "KYC Approved ✅",
+                            "Your CNIC has been verified. Tier 2 unlocked — PKR 1,00,000/day limit.", "system")
+
+    return {"message": "CNIC approved. User upgraded to Tier 2.", "review_id": str(review_id), "user_id": str(user.id)}
 
 
-@router.post("/kyc/{doc_id}/reject")
-async def reject_kyc(doc_id: UUID, body: UserActionRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    doc = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
-    if not doc:
-        raise HTTPException(404, "Document not found.")
-    await log_admin_action(db, admin.id, "reject_kyc", doc.user_id, "user", body.reason, {"doc_id": str(doc_id)})
-    await send_notification(db, doc.user_id, "KYC Rejected ❌", f"Your document was rejected: {body.reason}", "system")
-    return {"message": "KYC document rejected.", "doc_id": doc_id}
+@router.post("/kyc-reviews/{review_id}/reject")
+async def reject_kyc_review(
+    review_id: UUID,
+    body: KycDecisionRequest,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reject a CNIC review request with reason."""
+    review = (await db.execute(select(KycReviewRequest).where(KycReviewRequest.id == review_id))).scalar_one_or_none()
+    if not review:
+        raise HTTPException(404, "Review request not found.")
+    if review.status != "pending":
+        raise HTTPException(400, f"Review already {review.status}.")
+
+    review.status           = "rejected"
+    review.rejection_reason = body.reason or "Rejected by admin"
+    review.reviewed_by      = admin.id
+    review.reviewed_at      = _utcnow()
+    await db.commit()
+
+    await log_admin_action(db, admin.id, "reject_kyc_review", review.user_id, "user",
+                           body.reason or "CNIC review rejected", {"review_id": str(review_id)})
+    await send_notification(db, review.user_id, "KYC Rejected ❌",
+                            f"Your CNIC verification was rejected: {review.rejection_reason}. Please re-upload.", "system")
+
+    return {"message": "CNIC review rejected.", "review_id": str(review_id)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -526,45 +607,110 @@ async def reject_business(profile_id: UUID, body: UserActionRequest, admin: User
 # ══════════════════════════════════════════════════════════════════════════════
 # OFFER TEMPLATES + ASSIGN
 # ══════════════════════════════════════════════════════════════════════════════
+def _tmpl_to_dict(t: OfferTemplate) -> dict:
+    from datetime import date, timedelta
+    expiry = (t.created_at.date() + timedelta(days=t.duration_days)) if t.created_at else date.today()
+    return {
+        "id":                str(t.id),
+        "name":              t.title,
+        "type":              t.category,
+        "discount_type":     "flat",
+        "value":             float(t.reward_amount),
+        "min_spend":         float(t.target_amount),
+        "expiry_date":       expiry.isoformat(),
+        "description":       t.description or "",
+        "is_active":         t.is_active,
+        "completion_rate":   0,
+        "assignments_count": 0,
+        "created_at":        t.created_at.isoformat() if t.created_at else "",
+    }
+
+
 class OfferTemplateCreate(BaseModel):
-    title:         str            = Field(..., min_length=3, max_length=255)
+    name:          str            = Field(..., min_length=3, max_length=255)
+    type:          str            = Field(..., min_length=2)
+    discount_type: str            = "flat"
+    value:         Decimal        = Field(..., gt=0)
+    min_spend:     Decimal        = Field(default=Decimal("0"), ge=0)
+    expiry_date:   str
     description:   Optional[str] = None
-    category:      str            = Field(..., min_length=2)
-    target_amount: Decimal        = Field(..., gt=0)
-    reward_amount: Decimal        = Field(..., gt=0)
-    duration_days: int            = Field(default=30, ge=1)
+    is_active:     Optional[bool] = True
+
+
+def _parse_duration(expiry_date_str: str) -> int:
+    from datetime import date as _date
+    try:
+        exp = _date.fromisoformat(expiry_date_str)
+        return max(1, (exp - _date.today()).days)
+    except Exception:
+        return 30
 
 
 @router.post("/offers/templates", status_code=201)
 async def create_offer_template(body: OfferTemplateCreate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
     tmpl = OfferTemplate(
-        title=body.title, description=body.description, category=body.category,
-        target_amount=body.target_amount, reward_amount=body.reward_amount,
-        duration_days=body.duration_days, created_by=admin.id,
+        title=body.name, description=body.description, category=body.type.lower(),
+        target_amount=body.min_spend, reward_amount=body.value,
+        duration_days=_parse_duration(body.expiry_date),
+        is_active=body.is_active if body.is_active is not None else True,
+        created_by=admin.id,
     )
     db.add(tmpl)
     await db.commit()
     await db.refresh(tmpl)
     await log_admin_action(db, admin.id, "create_offer_template", metadata={"template_id": str(tmpl.id)})
-    return {"message": "Offer template created.", "template_id": tmpl.id}
+    return _tmpl_to_dict(tmpl)
 
 
 @router.get("/offers/templates")
 async def list_offer_templates(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    templates = (await db.execute(select(OfferTemplate).where(OfferTemplate.is_active == True))).scalars().all()
+    from sqlalchemy import func as sqlfunc
+    templates = (await db.execute(
+        select(OfferTemplate).order_by(OfferTemplate.created_at.desc())
+    )).scalars().all()
+    dicts = [_tmpl_to_dict(t) for t in templates]
     return {
-        "templates": [
-            {"id": t.id, "title": t.title, "category": t.category,
-             "target_amount": float(t.target_amount), "reward_amount": float(t.reward_amount),
-             "duration_days": t.duration_days}
-            for t in templates
-        ]
+        "templates":          dicts,
+        "total":              len(dicts),
+        "active_count":       sum(1 for t in templates if t.is_active),
+        "inactive_count":     sum(1 for t in templates if not t.is_active),
+        "assignments_this_month": 0,
     }
 
 
+@router.patch("/offers/templates/{template_id}", status_code=200)
+async def update_offer_template(template_id: UUID, body: OfferTemplateCreate, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    tmpl = (await db.execute(select(OfferTemplate).where(OfferTemplate.id == template_id))).scalar_one_or_none()
+    if not tmpl:
+        raise HTTPException(404, "Offer template not found.")
+    tmpl.title         = body.name
+    tmpl.category      = body.type.lower()
+    tmpl.target_amount = body.min_spend
+    tmpl.reward_amount = body.value
+    tmpl.duration_days = _parse_duration(body.expiry_date)
+    tmpl.description   = body.description
+    if body.is_active is not None:
+        tmpl.is_active = body.is_active
+    await db.commit()
+    await db.refresh(tmpl)
+    await log_admin_action(db, admin.id, "update_offer_template", metadata={"template_id": str(tmpl.id)})
+    return _tmpl_to_dict(tmpl)
+
+
+@router.delete("/offers/templates/{template_id}", status_code=200)
+async def delete_offer_template(template_id: UUID, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    tmpl = (await db.execute(select(OfferTemplate).where(OfferTemplate.id == template_id))).scalar_one_or_none()
+    if not tmpl:
+        raise HTTPException(404, "Offer template not found.")
+    await db.delete(tmpl)
+    await db.commit()
+    await log_admin_action(db, admin.id, "delete_offer_template", metadata={"template_id": str(template_id)})
+    return {"message": "Offer template deleted."}
+
+
 class AssignOfferRequest(BaseModel):
-    user_id:     UUID
     template_id: UUID
+    user_ids:    list[UUID]
     reason:      str = Field(default="Admin assigned offer")
 
 
@@ -574,17 +720,22 @@ async def assign_offer(body: AssignOfferRequest, admin: User = Depends(require_a
     tmpl = (await db.execute(select(OfferTemplate).where(OfferTemplate.id == body.template_id))).scalar_one_or_none()
     if not tmpl:
         raise HTTPException(404, "Offer template not found.")
-    offer = RewardOffer(
-        user_id=body.user_id, template_id=body.template_id,
-        title=tmpl.title, category=tmpl.category,
-        target_amount=tmpl.target_amount, reward_amount=tmpl.reward_amount,
-        expires_at=_utcnow() + timedelta(days=tmpl.duration_days),
-    )
-    db.add(offer)
+    assigned = []
+    for uid in body.user_ids:
+        offer = RewardOffer(
+            user_id=uid, template_id=body.template_id,
+            title=tmpl.title, category=tmpl.category,
+            target_amount=tmpl.target_amount, reward_amount=tmpl.reward_amount,
+            status="active",
+            expires_at=_utcnow() + timedelta(days=tmpl.duration_days),
+        )
+        db.add(offer)
+        assigned.append(str(uid))
     await db.commit()
-    await log_admin_action(db, admin.id, "assign_offer", body.user_id, "user", body.reason, {"template_id": str(body.template_id)})
-    await send_notification(db, body.user_id, "New Offer 🎁", f"You have a new offer: {tmpl.title}!", "rewards")
-    return {"message": "Offer assigned.", "offer_id": offer.id}
+    for uid in body.user_ids:
+        await log_admin_action(db, admin.id, "assign_offer", uid, "user", body.reason, {"template_id": str(body.template_id)})
+        await send_notification(db, uid, "New Offer 🎁", f"You have a new offer: {tmpl.title}!", "rewards")
+    return {"message": f"Offer assigned to {len(assigned)} user(s).", "assigned_user_ids": assigned}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

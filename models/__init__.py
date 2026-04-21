@@ -2,7 +2,7 @@ from models.user        import User, DeviceRegistry, RefreshToken, LoginAudit
 from models.wallet      import Wallet
 from models.transaction import Transaction
 from models.card        import VirtualCard, CardSubscription
-from models.kyc         import Document, FingerprintScan, BusinessProfile
+from models.kyc         import Document, FingerprintScan, BusinessProfile, KycReviewRequest
 from models.savings     import SavingGoal
 from models.finance     import Investment, InsurancePolicy, HighYieldDeposit
 from models.rewards     import Reward, OfferTemplate, RewardOffer, RewardTransaction
@@ -14,13 +14,14 @@ from models.zakat       import UserZakatSettings, WealthProfile, HawlTracking, M
 from models.fraud       import UserBehaviourProfile, WalletDebt, TransactionDispute, StrReport, ReversalRequest
 from models.platform    import PlatformAccount, PlatformLedgerEntry
 from models.gold        import GoldHolding
+from models.topup       import WalletTopUpRequest
 
 __all__ = [
     "User", "DeviceRegistry", "RefreshToken", "LoginAudit",
     "Wallet",
     "Transaction",
     "VirtualCard", "CardSubscription",
-    "Document", "FingerprintScan", "BusinessProfile",
+    "Document", "FingerprintScan", "BusinessProfile", "KycReviewRequest",
     "SavingGoal",
     "Investment", "InsurancePolicy", "HighYieldDeposit",
     "Reward", "OfferTemplate", "RewardOffer", "RewardTransaction",
@@ -32,4 +33,5 @@ __all__ = [
     "UserBehaviourProfile", "WalletDebt", "TransactionDispute", "StrReport", "ReversalRequest",
     "PlatformAccount", "PlatformLedgerEntry",
     "GoldHolding",
+    "WalletTopUpRequest",
 ]

@@ -57,6 +57,7 @@ class DepositResponse(BaseModel):
 
 class LookupResponse(BaseModel):
     found: bool
+    full_name: Optional[str] = None
     masked_name: Optional[str] = None
     masked_phone: Optional[str] = None
     tier: Optional[int] = None

@@ -6,6 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import asyncio
 import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -47,6 +48,8 @@ async def _fetch_and_cache_rates() -> None:
                     raise ValueError(f"er-api.com returned HTTP {fx_resp.status}")
                 fx_data = await fx_resp.json()
 
+    except asyncio.CancelledError:
+        return  # graceful shutdown — do nothing
     except Exception as e:
         print(f"[metal_rate_scheduler] ERROR fetching rates: {e}")
         await _check_cache_age()
@@ -98,8 +101,39 @@ async def _fetch_and_cache_rates() -> None:
         print(f"[metal_rate_scheduler] ERROR processing/saving rates: {e}")
 
 
+# Hardcoded fallback rates (Apr 2026 approximate values)
+_FALLBACK_GOLD_USD_OZ   = Decimal("3250.00")
+_FALLBACK_SILVER_USD_OZ = Decimal("32.50")
+_FALLBACK_USD_TO_PKR    = Decimal("278.50")
+
+
+async def _seed_fallback_rates() -> None:
+    """Insert hardcoded fallback rates so the app is functional when the external API is unreachable."""
+    try:
+        gold_pkr_gram    = (_FALLBACK_GOLD_USD_OZ   * _FALLBACK_USD_TO_PKR) / TROY_OZ_GRAMS
+        silver_pkr_gram  = (_FALLBACK_SILVER_USD_OZ * _FALLBACK_USD_TO_PKR) / TROY_OZ_GRAMS
+        nisab_gold_pkr   = gold_pkr_gram   * NISAB_GOLD_GRAMS
+        nisab_silver_pkr = silver_pkr_gram * NISAB_SILVER_GRAMS
+        async with AsyncSessionLocal() as db:
+            db.add(MetalRateCache(
+                gold_usd_oz      = _FALLBACK_GOLD_USD_OZ.quantize(Decimal("0.0001")),
+                silver_usd_oz    = _FALLBACK_SILVER_USD_OZ.quantize(Decimal("0.0001")),
+                usd_to_pkr       = _FALLBACK_USD_TO_PKR.quantize(Decimal("0.0001")),
+                gold_pkr_gram    = gold_pkr_gram.quantize(Decimal("0.0001")),
+                silver_pkr_gram  = silver_pkr_gram.quantize(Decimal("0.0001")),
+                nisab_gold_pkr   = nisab_gold_pkr.quantize(Decimal("0.01")),
+                nisab_silver_pkr = nisab_silver_pkr.quantize(Decimal("0.01")),
+                source           = "hardcoded-fallback",
+                fetched_at       = _utcnow(),
+            ))
+            await db.commit()
+        print("[metal_rate_scheduler] seeded fallback rates — gold=~3250 USD/oz, USD/PKR=~278.5")
+    except Exception as e:
+        print(f"[metal_rate_scheduler] ERROR seeding fallback rates: {e}")
+
+
 async def _check_cache_age() -> None:
-    """Log a critical alert if the most recent cache entry is older than 7 days."""
+    """Log a critical alert if the most recent cache entry is older than 7 days; seed fallback if empty."""
     try:
         from sqlalchemy import select
         async with AsyncSessionLocal() as db:
@@ -109,7 +143,8 @@ async def _check_cache_age() -> None:
             )).scalar_one_or_none()
 
             if latest is None:
-                print("[metal_rate_scheduler] CRITICAL — metal_rate_cache is EMPTY. No fallback available.")
+                print("[metal_rate_scheduler] cache is EMPTY — seeding hardcoded fallback rates.")
+                await _seed_fallback_rates()
             else:
                 age_days = (_utcnow() - latest.fetched_at).days
                 if age_days >= 7:

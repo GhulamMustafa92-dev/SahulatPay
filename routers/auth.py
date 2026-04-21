@@ -692,6 +692,42 @@ async def update_fcm_token(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# GET /auth/me  — validate token + return live account state from the database
+# Android calls this on every app startup to verify the token is still valid
+# and to sync local state (pin_set, biometric_enabled, tier) from the backend.
+# Returns 401 if token expired/revoked → app clears local storage → login screen.
+# ══════════════════════════════════════════════════════════════════════════════
+from pydantic import BaseModel as _BM2
+
+class MeResponse(_BM2):
+    user_id:           str
+    full_name:         str
+    phone_masked:      str
+    phone:             str
+    pin_set:           bool
+    biometric_enabled: bool
+    verification_tier: int
+    is_verified:       bool
+    is_locked:         bool
+    account_type:      str
+
+@router.get("/me", response_model=MeResponse)
+async def get_me(current_user: User = Depends(get_current_user)):
+    return MeResponse(
+        user_id           = str(current_user.id),
+        full_name         = current_user.full_name,
+        phone_masked      = mask_phone(current_user.phone_number),
+        phone             = current_user.phone_number,
+        pin_set           = bool(current_user.pin_hash),
+        biometric_enabled = bool(current_user.biometric_enabled),
+        verification_tier = current_user.verification_tier or 0,
+        is_verified       = current_user.is_verified or False,
+        is_locked         = current_user.is_locked or False,
+        account_type      = current_user.account_type or "individual",
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # GET /auth/dev/otp  — DEV_MODE only: returns the last OTP sent to a phone
 # Android dev builds call this to auto-fill the OTP input field.
 # This endpoint returns 404 in production (DEV_MODE=False).
