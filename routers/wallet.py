@@ -1,4 +1,5 @@
 """Wallet router — balance, deposit, lookup, transfer (PROMPT 04)."""
+import asyncio
 from decimal import Decimal
 from datetime import datetime, timezone
 from uuid import UUID
@@ -21,6 +22,7 @@ from services.wallet_service import (
     TIER_LIMITS,
 )
 from services.platform_ledger import ledger_credit, make_idem_key
+from services.notification_service import send_notification
 from schemas.wallet import (
     WalletResponse, TransactionSummary,
     DepositRequest, DepositResponse,
@@ -268,6 +270,24 @@ async def transfer(
             pending_tx_token=result["pending_tx_token"],
         )
 
+    if result.get("status") == "completed":
+        ref = result["reference_number"]
+        amt = body.amount
+        asyncio.create_task(send_notification(
+            db, current_user.id,
+            title="Money Sent ✓",
+            body=f"PKR {amt:,.0f} sent to {_mask_name(recipient.full_name)}. Ref: {ref}",
+            type="transaction",
+            data={"reference": ref, "amount": str(amt), "direction": "debit"},
+        ))
+        asyncio.create_task(send_notification(
+            db, recipient.id,
+            title="Money Received 💰",
+            body=f"PKR {amt:,.0f} received from {_mask_name(current_user.full_name)}. Ref: {ref}",
+            type="transaction",
+            data={"reference": ref, "amount": str(amt), "direction": "credit"},
+        ))
+
     return TransferResponse(
         status="completed",
         message=f"PKR {body.amount:,.2f} sent to {_mask_name(recipient.full_name)}",
@@ -315,6 +335,26 @@ async def confirm_transfer(
         card_id=card_id,
         biometric_confirmed=True,
     )
+
+    if result.get("status") == "completed":
+        ref = result["reference_number"]
+        amt = Decimal(payload["amount"])
+        s_id = UUID(payload["sender_id"])
+        r_id = UUID(payload["recipient_id"])
+        asyncio.create_task(send_notification(
+            db, s_id,
+            title="Money Sent ✓",
+            body=f"PKR {amt:,.0f} sent successfully (biometric confirmed). Ref: {ref}",
+            type="transaction",
+            data={"reference": ref, "amount": str(amt), "direction": "debit"},
+        ))
+        asyncio.create_task(send_notification(
+            db, r_id,
+            title="Money Received 💰",
+            body=f"PKR {amt:,.0f} received. Ref: {ref}",
+            type="transaction",
+            data={"reference": ref, "amount": str(amt), "direction": "credit"},
+        ))
 
     return TransferResponse(
         status="completed",

@@ -18,6 +18,9 @@ async def lifespan(app: FastAPI):
     # Firebase init
     _init_firebase()
 
+    # Ensure platform_accounts rows exist (safe after reset_db wipe)
+    await _ensure_platform_accounts()
+
     # Mock SQLite DB — create tables + seed data
     from mock_servers.db import create_all_tables
     from mock_servers.seeds import seed_all
@@ -73,6 +76,30 @@ async def lifespan(app: FastAPI):
     stop_debt_scheduler()
     stop_reconciliation_scheduler()
     print("[shutdown] server stopping")
+
+
+async def _ensure_platform_accounts() -> None:
+    """INSERT platform_accounts seed rows if they were wiped (e.g. by reset_db.py).
+    Uses ON CONFLICT DO NOTHING so it is idempotent and costs almost nothing."""
+    from sqlalchemy import text
+    from database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as _db:
+            await _db.execute(text("""
+                INSERT INTO platform_accounts (type, balance)
+                VALUES
+                    ('savings_pool',    0.00),
+                    ('investment_pool', 0.00),
+                    ('insurance_pool',  0.00),
+                    ('gold_platform',   0.00),
+                    ('main_float',      0.00),
+                    ('platform_revenue',0.00)
+                ON CONFLICT (type) DO NOTHING
+            """))
+            await _db.commit()
+        print("[startup] platform_accounts seeded/verified OK")
+    except Exception as _e:
+        print(f"[startup] platform_accounts seed failed: {_e}")
 
 
 def _init_firebase():
