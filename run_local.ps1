@@ -27,6 +27,7 @@ $env:DEV_MODE = "True"
 $env:ENVIRONMENT = "development"
 $env:ALLOWED_ORIGINS = "*"
 $env:PORT = "8000"
+$env:FIREBASE_CREDENTIALS_JSON = "$PSScriptRoot\firebase-adminsdk.json"
 
 Write-Host ""
 Write-Host "  Starting SahulatPay backend..." -ForegroundColor Cyan

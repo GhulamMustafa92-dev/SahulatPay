@@ -9,3 +9,5 @@ venv/
 .mypy_cache/
 firebase-credentials.json
 firebase_b64.txt
+firebase-adminsdk.json
+*-firebase-adminsdk-*.json
