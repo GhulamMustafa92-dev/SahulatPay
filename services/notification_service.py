@@ -73,32 +73,40 @@ async def _push_fcm(
 
 # ── Main public function ───────────────────────────────────────────────────────
 async def send_notification(
-    db: AsyncSession,
+    db: AsyncSession,       # kept for call-site compatibility; NOT used internally
     user_id: UUID,
     title: str,
     body: str,
     type: str,
     data: Optional[dict[str, Any]] = None,
-) -> Notification:
+) -> None:
     """
-    Insert a Notification row in Postgres, then fire FCM push non-blocking.
+    Insert a Notification row in Postgres, then fire FCM push.
+
+    Always opens its OWN AsyncSessionLocal session so it is safe to run as
+    asyncio.create_task() after the request session has been returned to the
+    pool (avoids IllegalStateChangeError on session.close()).
 
     type options: transaction | security | system | ai_insight | admin |
                   split | savings | investment | insurance | rewards | zakat
     """
-    notif = Notification(
-        user_id = user_id,
-        title   = title,
-        body    = body,
-        type    = type,
-        data    = data or {},
-    )
-    db.add(notif)
-    await db.commit()
-    await db.refresh(notif)
+    try:
+        from database import AsyncSessionLocal
+        async with AsyncSessionLocal() as _db:
+            notif = Notification(
+                user_id = user_id,
+                title   = title,
+                body    = body,
+                type    = type,
+                data    = data or {},
+            )
+            _db.add(notif)
+            await _db.commit()
+            await _db.refresh(notif)
 
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
-    if user and user.fcm_token:
-        asyncio.create_task(_push_fcm(user.fcm_token, title, body, data or {}, user_id=user_id))
-
-    return notif
+            user = (await _db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+            if user and user.fcm_token:
+                await _push_fcm(user.fcm_token, title, body, data or {}, user_id=user_id)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("[send_notification] failed for user %s: %s", user_id, exc)
