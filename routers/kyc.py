@@ -281,7 +281,7 @@ async def verify_liveness(
     # Face++ comparison
     confidence = await facepp_compare(selfie_bytes, cnic_bytes)
 
-    THRESHOLD = 80.0
+    THRESHOLD = 75.0
     if confidence < THRESHOLD:
         raise HTTPException(400, f"Liveness check failed. Face match confidence {confidence:.1f}% (minimum {THRESHOLD}% required). Please try again in good lighting.")
 
