@@ -32,6 +32,20 @@ async def _push_fcm(
         msg = messaging.Message(
             notification=messaging.Notification(title=title, body=body),
             data={str(k): str(v) for k, v in (data or {}).items()},
+            android=messaging.AndroidConfig(
+                priority="high",
+                notification=messaging.AndroidNotification(
+                    channel_id="sahulatpay_main",
+                    priority="high",
+                    default_vibrate_timings=True,
+                    default_sound=True,
+                ),
+            ),
+            apns=messaging.APNSConfig(
+                payload=messaging.APNSPayload(
+                    aps=messaging.Aps(sound="default", badge=1),
+                ),
+            ),
             token=fcm_token,
         )
         messaging.send(msg)
