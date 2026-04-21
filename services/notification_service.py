@@ -13,6 +13,10 @@ from models.user  import User
 
 
 # ── FCM push helper ────────────────────────────────────────────────────────────
+import logging as _logging
+_log = _logging.getLogger(__name__)
+
+
 async def _push_fcm(
     fcm_token: str,
     title: str,
@@ -22,13 +26,21 @@ async def _push_fcm(
 ) -> None:
     """
     Fire-and-forget FCM push via firebase-admin.
+    Runs the blocking messaging.send() in a thread-pool executor so it does
+    not block the async event loop.
     If the token is invalid/unregistered, nulls user.fcm_token in DB so we
     don't retry until the app sends a fresh token via PUT /users/fcm-token.
     """
     if not fcm_token:
+        _log.debug("[FCM] skipped — no token for user %s", user_id)
         return
     try:
+        import firebase_admin
+        if not firebase_admin._apps:
+            _log.warning("[FCM] firebase not initialized — push skipped for user %s", user_id)
+            return
         from firebase_admin import messaging
+        import asyncio, functools
         msg = messaging.Message(
             notification=messaging.Notification(title=title, body=body),
             data={str(k): str(v) for k, v in (data or {}).items()},
@@ -48,9 +60,12 @@ async def _push_fcm(
             ),
             token=fcm_token,
         )
-        messaging.send(msg)
+        loop = asyncio.get_event_loop()
+        msg_id = await loop.run_in_executor(None, functools.partial(messaging.send, msg))
+        _log.info("[FCM] sent to user %s — message_id=%s title=%r", user_id, msg_id, title)
     except Exception as e:
         err_str = str(e).lower()
+        _log.warning("[FCM] send failed for user %s: %s", user_id, e)
         _invalid = (
             "registration-token-not-registered" in err_str
             or "invalid registration" in err_str
@@ -67,6 +82,7 @@ async def _push_fcm(
                         .values(fcm_token=None)
                     )
                     await _db.commit()
+                _log.info("[FCM] cleared stale token for user %s", user_id)
             except Exception:
                 pass
 

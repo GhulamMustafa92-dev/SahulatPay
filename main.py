@@ -76,24 +76,35 @@ async def lifespan(app: FastAPI):
 
 
 def _init_firebase():
-    import base64, tempfile, os
+    import base64, os, tempfile
     try:
         import firebase_admin
         from firebase_admin import credentials
         if not firebase_admin._apps:
+            cred = None
             if settings.FIREBASE_CREDENTIALS_BASE64:
                 decoded = base64.b64decode(settings.FIREBASE_CREDENTIALS_BASE64)
                 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
                 tmp.write(decoded)
                 tmp.flush()
                 cred = credentials.Certificate(tmp.name)
+                print("[firebase] using base64 credentials")
             elif settings.FIREBASE_CREDENTIALS_JSON:
                 cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_JSON)
+                print(f"[firebase] using credentials from {settings.FIREBASE_CREDENTIALS_JSON}")
             else:
-                print("[firebase] no credentials — FCM disabled")
+                _base = os.path.dirname(os.path.abspath(__file__))
+                for _fname in ("firebase-credentials.json", "firebase-adminsdk.json"):
+                    _path = os.path.join(_base, _fname)
+                    if os.path.exists(_path):
+                        cred = credentials.Certificate(_path)
+                        print(f"[firebase] auto-detected credentials: {_fname}")
+                        break
+            if cred is None:
+                print("[firebase] no credentials found — FCM push disabled")
                 return
             firebase_admin.initialize_app(cred)
-            print("[firebase] initialized")
+            print("[firebase] initialized OK")
     except Exception as e:
         print(f"[firebase] init failed: {e}")
 
