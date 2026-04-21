@@ -12,6 +12,7 @@ class CardIssueRequest(BaseModel):
     card_network: str = Field("visa", pattern="^(visa|mastercard)$")
     card_name: Optional[str] = Field(None, max_length=100)
     gradient_theme: str = Field("blue", pattern="^(blue|purple|green|gold|red|midnight)$")
+    pin: Optional[str] = Field(None, min_length=6, max_length=6)
 
 
 class CardResponse(BaseModel):

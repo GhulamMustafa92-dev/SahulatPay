@@ -561,6 +561,36 @@ async def update_delivery_status(card_id: UUID, body: DeliveryStatusRequest, adm
     return {"message": f"Card delivery status updated to '{body.delivery_status}'.", "card_id": card_id}
 
 
+@router.post("/cards/{card_id}/approve")
+async def admin_approve_card(card_id: UUID, body: UserActionRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    card = (await db.execute(select(VirtualCard).where(VirtualCard.id == card_id))).scalar_one_or_none()
+    if not card:
+        raise HTTPException(404, "Card not found.")
+    if card.status != "pending_approval":
+        raise HTTPException(400, f"Card is not pending approval (current status: {card.status}).")
+    card.status = "processing" if card.physical_requested else "active"
+    await db.commit()
+    await log_admin_action(db, admin.id, "approve_card", card.user_id, "user", body.reason, {"card_id": str(card_id)})
+    msg = "Your card is being processed." if card.physical_requested else "Your virtual card has been approved and is now active! 🎉"
+    await send_notification(db, card.user_id, "Card Approved ✅", msg, "system")
+    return {"message": f"Card {card_id} approved.", "new_status": card.status}
+
+
+@router.post("/cards/{card_id}/reject")
+async def admin_reject_card(card_id: UUID, body: UserActionRequest, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
+    card = (await db.execute(select(VirtualCard).where(VirtualCard.id == card_id))).scalar_one_or_none()
+    if not card:
+        raise HTTPException(404, "Card not found.")
+    if card.status != "pending_approval":
+        raise HTTPException(400, f"Card is not pending approval (current status: {card.status}).")
+    card.status = "blocked"
+    await db.commit()
+    await log_admin_action(db, admin.id, "reject_card", card.user_id, "user", body.reason, {"card_id": str(card_id)})
+    reason_msg = f" Reason: {body.reason}" if body.reason else ""
+    await send_notification(db, card.user_id, "Card Request Rejected", f"Your card request was not approved.{reason_msg}", "security")
+    return {"message": f"Card {card_id} rejected."}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # BUSINESS PROFILES
 # ══════════════════════════════════════════════════════════════════════════════

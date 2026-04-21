@@ -190,10 +190,11 @@ async def issue_card(
         expiry_month             = expiry.month,
         expiry_year              = expiry.year,
         gradient_theme           = body.gradient_theme,
-        status                   = "processing" if body.card_type == "physical" else "active",
+        status                   = "pending_approval",
         delivery_status          = "processing" if body.card_type == "physical" else None,
         physical_requested       = body.card_type == "physical",
         monthly_reset_at         = _next_month_first(),
+        pin_hash                 = _hash_pin(body.pin) if body.pin else None,
     )
     db.add(card)
     await db.commit()
@@ -249,6 +250,9 @@ async def get_card_details(
 ):
     """Returns full card number + CVV. Requires card PIN or user PIN."""
     card = await _get_card_or_404(card_id, current_user.id, db)
+
+    if card.status == "pending_approval":
+        raise HTTPException(status_code=403, detail="Card is awaiting admin approval.")
 
     pin_ok = False
     if card.pin_hash and _verify_pin(pin, card.pin_hash):
@@ -440,6 +444,8 @@ async def card_pay(
     """Simulated merchant payment using a virtual card."""
     card = await _get_card_or_404(card_id, current_user.id, db)
 
+    if card.status == "pending_approval":
+        raise HTTPException(status_code=403, detail="Card is awaiting admin approval. Cannot process payment.")
     if card.status != "active":
         raise HTTPException(status_code=400, detail=f"Card is {card.status}. Cannot process payment.")
     if card.is_frozen:
