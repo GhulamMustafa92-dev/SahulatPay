@@ -321,7 +321,7 @@ async def approve_kyc_review(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Approve a CNIC (→ Tier 2) or Liveness (→ Tier 3) review request."""
+    """Approve a CNIC (→ Tier 2), Liveness (→ Tier 3), or Fingerprint (→ Tier 4) review."""
     review = (await db.execute(select(KycReviewRequest).where(KycReviewRequest.id == review_id))).scalar_one_or_none()
     if not review:
         raise HTTPException(404, "Review request not found.")
@@ -341,7 +341,27 @@ async def approve_kyc_review(
 
     rtype = review.review_type or "cnic"
 
-    if rtype == "liveness":
+    if rtype == "fingerprint":
+        # Fingerprint approval → Tier 4
+        user.fingerprint_verified = True
+        user.nadra_verified       = True
+        user.verification_tier    = max(user.verification_tier or 0, 4)
+        if wallet:
+            wallet.daily_limit = _KYC_TIER_LIMITS.get(4, wallet.daily_limit)
+        await db.commit()
+        await log_admin_action(db, admin.id, "approve_fingerprint_review", user.id, "user",
+                               body.reason or "Fingerprint review approved", {"review_id": str(review_id)})
+        await send_notification(
+            db, user.id, "Fingerprint Verified ✅",
+            "Your biometric fingerprint has been approved by admin. Tier 4 unlocked — PKR 20,00,000/day limit.",
+            "system"
+        )
+        return {
+            "message": "Fingerprint approved. User upgraded to Tier 4.",
+            "review_id": str(review_id),
+            "user_id": str(user.id),
+        }
+    elif rtype == "liveness":
         # Liveness approval → Tier 3
         user.biometric_verified = True
         user.verification_tier  = max(user.verification_tier or 0, 3)
@@ -361,7 +381,7 @@ async def approve_kyc_review(
             "user_id": str(user.id),
         }
     else:
-        # CNIC approval → Tier 2 (original logic)
+        # CNIC approval → Tier 2
         user.cnic_encrypted     = review.cnic_encrypted
         user.cnic_number        = review.extracted_cnic
         user.cnic_number_masked = review.cnic_masked
@@ -384,7 +404,7 @@ async def reject_kyc_review(
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """Reject a CNIC review request with reason."""
+    """Reject a KYC review request (CNIC / Liveness / Fingerprint) with a reason."""
     review = (await db.execute(select(KycReviewRequest).where(KycReviewRequest.id == review_id))).scalar_one_or_none()
     if not review:
         raise HTTPException(404, "Review request not found.")
@@ -397,12 +417,19 @@ async def reject_kyc_review(
     review.reviewed_at      = _utcnow()
     await db.commit()
 
-    await log_admin_action(db, admin.id, "reject_kyc_review", review.user_id, "user",
-                           body.reason or "CNIC review rejected", {"review_id": str(review_id)})
-    await send_notification(db, review.user_id, "KYC Rejected ❌",
-                            f"Your CNIC verification was rejected: {review.rejection_reason}. Please re-upload.", "system")
+    rtype = review.review_type or "cnic"
+    notif_map = {
+        "cnic":        ("KYC Rejected ❌",         f"Your CNIC verification was rejected: {review.rejection_reason}. Please re-upload."),
+        "liveness":    ("Liveness Rejected ❌",     f"Your face scan was rejected: {review.rejection_reason}. Please redo the verification."),
+        "fingerprint": ("Fingerprint Rejected ❌",  f"Your fingerprint scan was rejected: {review.rejection_reason}. Please redo biometric registration."),
+    }
+    title, message = notif_map.get(rtype, notif_map["cnic"])
 
-    return {"message": "CNIC review rejected.", "review_id": str(review_id)}
+    await log_admin_action(db, admin.id, f"reject_{rtype}_review", review.user_id, "user",
+                           body.reason or f"{rtype} review rejected", {"review_id": str(review_id)})
+    await send_notification(db, review.user_id, title, message, "system")
+
+    return {"message": f"{rtype.title()} review rejected.", "review_id": str(review_id)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
