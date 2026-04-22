@@ -52,7 +52,7 @@ async def _get_or_create_wealth_profile(db: AsyncSession, user_id: UUID) -> Weal
         select(WealthProfile).where(WealthProfile.user_id == user_id)
     )).scalar_one_or_none()
     if not row:
-        row = WealthProfile(user_id=user_id)
+        row = WealthProfile(user_id=user_id, last_verified_at=_utcnow())
         db.add(row)
         await db.commit()
         await db.refresh(row)
@@ -303,15 +303,15 @@ async def calculate_zakat(
     # Step 1 — Profile freshness check
     wp = await _get_or_create_wealth_profile(db, current_user.id)
     if wp.last_verified_at is None:
-        raise HTTPException(400, detail={
-            "code":    "PROFILE_STALE",
-            "message": "Wealth profile must be reviewed before calculation. Please go to PUT /zakat/wealth-profile to save your current wealth data.",
-        })
+        # Auto-heal profiles created before the last_verified_at-on-creation fix
+        wp.last_verified_at = _utcnow()
+        await db.commit()
+        await db.refresh(wp)
     days_since = (_utcnow() - wp.last_verified_at).days
     if days_since > 30:
         raise HTTPException(400, detail={
             "code":    "PROFILE_STALE",
-            "message": f"Wealth profile was last verified {days_since} days ago. Please update it via PUT /zakat/wealth-profile before calculating.",
+            "message": f"Your wealth profile was last reviewed {days_since} days ago. Please open the Zakat calculator, update your assets and tap Save before calculating.",
         })
 
     # Step 2 — Load wallet, settings, rates
