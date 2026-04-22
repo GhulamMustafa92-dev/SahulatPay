@@ -366,6 +366,29 @@ class AddContactRequest(BaseModel):
     nickname: Optional[str] = Field(default=None, max_length=100)
 
 
+@router.get("/trusted-circle/lookup")
+async def lookup_trusted_contact(
+    phone: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Look up a user by phone number before adding them to the trusted circle."""
+    try:
+        normalized = normalize_phone(phone)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if normalized == current_user.phone_number:
+        raise HTTPException(400, "That is your own number.")
+    contact = (await db.execute(select(User).where(User.phone_number == normalized))).scalar_one_or_none()
+    if not contact:
+        raise HTTPException(404, "No SahulatPay user found with this number.")
+    return {
+        "found":      True,
+        "full_name":  contact.full_name,
+        "phone_masked": _mask_phone(contact.phone_number),
+    }
+
+
 @router.get("/trusted-circle")
 async def get_trusted_circle(
     current_user: User = Depends(get_current_user),
