@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import asyncio
+import json
 import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -46,14 +47,21 @@ async def _fetch_and_cache_rates() -> None:
         headers = {"X-API-KEY": settings.GOLDPRICEZ_API_KEY}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
             async with session.get(_GOLDPRICEZ_URL, headers=headers) as metals_resp:
+                raw_text = await metals_resp.text()
                 if metals_resp.status != 200:
-                    raise ValueError(f"goldpricez.com returned HTTP {metals_resp.status}")
-                metals_data = await metals_resp.json()
+                    raise ValueError(
+                        f"goldpricez.com returned HTTP {metals_resp.status}: {raw_text[:300]}"
+                    )
+                try:
+                    metals_data = json.loads(raw_text)
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"goldpricez.com non-JSON response: {raw_text[:300]}") from e
+                print(f"[metal_rate_scheduler] goldpricez raw keys: {list(metals_data.keys()) if isinstance(metals_data, dict) else type(metals_data).__name__ + ': ' + repr(metals_data)[:200]}")
 
             async with session.get(_FX_URL) as fx_resp:
                 if fx_resp.status != 200:
                     raise ValueError(f"er-api.com returned HTTP {fx_resp.status}")
-                fx_data = await fx_resp.json()
+                fx_data = await fx_resp.json(content_type=None)
 
     except asyncio.CancelledError:
         return  # graceful shutdown — do nothing
@@ -63,12 +71,27 @@ async def _fetch_and_cache_rates() -> None:
         return
 
     try:
-        # goldpricez returns {"gold": {"price": <pkr/gram>, ...}, "silver": {"price": <pkr/gram>, ...}}
-        gold_data   = metals_data.get("gold",   {})
-        silver_data = metals_data.get("silver", {})
+        # Normalise: goldpricez may return a dict {"gold": {...}, "silver": {...}}
+        # or a list [{"metal": "gold", "price": ...}, {"metal": "silver", ...}]
+        if isinstance(metals_data, list):
+            gold_data   = next((x for x in metals_data if str(x.get("metal", "")).lower() == "gold"),   {})
+            silver_data = next((x for x in metals_data if str(x.get("metal", "")).lower() == "silver"), {})
+        elif isinstance(metals_data, dict):
+            gold_data   = metals_data.get("gold",   metals_data.get("Gold",   {}))
+            silver_data = metals_data.get("silver", metals_data.get("Silver", {}))
+        else:
+            raise ValueError(f"Unexpected goldpricez response type: {type(metals_data).__name__}: {repr(metals_data)[:200]}")
 
-        gold_pkr_gram   = Decimal(str(gold_data.get("price",   0)))
-        silver_pkr_gram = Decimal(str(silver_data.get("price", 0)))
+        # price field may be "price", "current", or "rate"
+        def _extract_price(d: dict) -> Decimal:
+            for key in ("price", "current", "rate", "bid", "ask"):
+                v = d.get(key)
+                if v is not None:
+                    return Decimal(str(v))
+            raise KeyError(f"No price field found in: {d}")
+
+        gold_pkr_gram   = _extract_price(gold_data)
+        silver_pkr_gram = _extract_price(silver_data)
 
         if gold_pkr_gram <= 0 or silver_pkr_gram <= 0:
             raise ValueError(
