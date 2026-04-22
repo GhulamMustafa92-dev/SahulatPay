@@ -260,7 +260,10 @@ async def list_kyc_reviews(
     for r in reviews:
         # Fetch user info
         user = (await db.execute(select(User).where(User.id == r.user_id))).scalar_one_or_none()
-        # Build signed URLs for front/back
+        # Build signed URLs for front/back.
+        # For liveness/fingerprint reviews the review row has no front_doc_id —
+        # fall back to the user's most recently uploaded CNIC documents so the
+        # admin can compare the selfie against the ID photos.
         front_url = None
         back_url  = None
         if r.front_doc_id:
@@ -271,6 +274,24 @@ async def list_kyc_reviews(
             back_doc = (await db.execute(select(Document).where(Document.id == r.back_doc_id))).scalar_one_or_none()
             if back_doc:
                 back_url = get_signed_url(back_doc.cloudinary_public_id)
+        if not front_url:
+            fb = (await db.execute(
+                select(Document).where(
+                    Document.user_id       == r.user_id,
+                    Document.document_type == "cnic_front",
+                ).order_by(Document.uploaded_at.desc()).limit(1)
+            )).scalars().first()
+            if fb:
+                front_url = get_signed_url(fb.cloudinary_public_id)
+        if not back_url:
+            bb = (await db.execute(
+                select(Document).where(
+                    Document.user_id       == r.user_id,
+                    Document.document_type == "cnic_back",
+                ).order_by(Document.uploaded_at.desc()).limit(1)
+            )).scalars().first()
+            if bb:
+                back_url = get_signed_url(bb.cloudinary_public_id)
 
         # Build selfie URL for liveness reviews
         selfie_url = None
