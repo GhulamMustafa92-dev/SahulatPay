@@ -26,8 +26,9 @@ NISAB_GOLD_GRAMS   = Decimal("87.48")
 NISAB_SILVER_GRAMS = Decimal("612.36")
 TROY_OZ_GRAMS      = Decimal("31.1035")
 
-# goldpricez.com — returns PKR/gram directly (supports tola-pakistan, masha, etc.)
-_GOLDPRICEZ_URL = "https://goldpricez.com/api/rates/currency/pkr/measure/gram/metal/all"
+# goldpricez.com — gold USD/oz (free tier; double-encoded JSON response)
+_GOLDPRICEZ_URL = "https://goldpricez.com/api/rates/currency/usd/measure/ounce"
+# er-api.com — USD→PKR rate + XAG (silver troy oz per USD) in one call
 _FX_URL         = "https://open.er-api.com/v6/latest/USD"
 
 
@@ -37,8 +38,8 @@ def _utcnow() -> datetime:
 
 async def _fetch_and_cache_rates() -> None:
     """
-    Fetch gold/silver PKR/gram directly from goldpricez.com (Pakistan market prices).
-    Also fetch USD→PKR from er-api.com to back-calculate USD/oz for DB storage.
+    Fetch gold USD/oz from goldpricez.com, silver USD/oz from er-api.com XAG rate,
+    USD→PKR from er-api.com, then compute PKR/gram and nisab thresholds.
     INSERT a new MetalRateCache row on success; on failure keep previous cache row.
     """
     print(f"[metal_rate_scheduler] fetching rates @ {_utcnow().isoformat()}")
@@ -53,10 +54,12 @@ async def _fetch_and_cache_rates() -> None:
                         f"goldpricez.com returned HTTP {metals_resp.status}: {raw_text[:300]}"
                     )
                 try:
-                    metals_data = json.loads(raw_text)
-                except json.JSONDecodeError as e:
-                    raise ValueError(f"goldpricez.com non-JSON response: {raw_text[:300]}") from e
-                print(f"[metal_rate_scheduler] goldpricez raw keys: {list(metals_data.keys()) if isinstance(metals_data, dict) else type(metals_data).__name__ + ': ' + repr(metals_data)[:200]}")
+                    parsed = json.loads(raw_text)
+                    # goldpricez free tier double-encodes: outer JSON is a string containing JSON
+                    gold_data = json.loads(parsed) if isinstance(parsed, str) else parsed
+                except (json.JSONDecodeError, TypeError) as e:
+                    raise ValueError(f"goldpricez.com non-JSON response: {raw_text[:400]}") from e
+                print(f"[metal_rate_scheduler] goldpricez decoded: type={type(gold_data).__name__}, keys={list(gold_data.keys()) if isinstance(gold_data, dict) else repr(gold_data)[:300]}")
 
             async with session.get(_FX_URL) as fx_resp:
                 if fx_resp.status != 200:
@@ -71,40 +74,39 @@ async def _fetch_and_cache_rates() -> None:
         return
 
     try:
-        # Normalise: goldpricez may return a dict {"gold": {...}, "silver": {...}}
-        # or a list [{"metal": "gold", "price": ...}, {"metal": "silver", ...}]
-        if isinstance(metals_data, list):
-            gold_data   = next((x for x in metals_data if str(x.get("metal", "")).lower() == "gold"),   {})
-            silver_data = next((x for x in metals_data if str(x.get("metal", "")).lower() == "silver"), {})
-        elif isinstance(metals_data, dict):
-            gold_data   = metals_data.get("gold",   metals_data.get("Gold",   {}))
-            silver_data = metals_data.get("silver", metals_data.get("Silver", {}))
+        # goldpricez: flat dict with ounce_price_usd = gold USD/troy oz
+        if not isinstance(gold_data, dict):
+            raise ValueError(f"goldpricez decoded to unexpected type: {type(gold_data).__name__}: {repr(gold_data)[:200]}")
+        gold_usd_oz = Decimal(str(
+            gold_data.get("ounce_price_usd")
+            or gold_data.get("price")
+            or gold_data.get("rate")
+            or 0
+        ))
+        if gold_usd_oz <= 0:
+            raise ValueError(f"goldpricez: no valid gold USD/oz price. Keys: {list(gold_data.keys())}")
+
+        # er-api.com includes XAG (troy oz of silver per USD) in the same response
+        # silver_usd_oz = 1 / XAG_per_USD  (e.g. XAG=0.031 → silver=$32.26/oz)
+        xag_per_usd = Decimal(str(fx_data.get("rates", {}).get("XAG", 0)))
+        if xag_per_usd > 0:
+            silver_usd_oz = Decimal("1") / xag_per_usd
         else:
-            raise ValueError(f"Unexpected goldpricez response type: {type(metals_data).__name__}: {repr(metals_data)[:200]}")
-
-        # price field may be "price", "current", or "rate"
-        def _extract_price(d: dict) -> Decimal:
-            for key in ("price", "current", "rate", "bid", "ask"):
-                v = d.get(key)
-                if v is not None:
-                    return Decimal(str(v))
-            raise KeyError(f"No price field found in: {d}")
-
-        gold_pkr_gram   = _extract_price(gold_data)
-        silver_pkr_gram = _extract_price(silver_data)
-
-        if gold_pkr_gram <= 0 or silver_pkr_gram <= 0:
-            raise ValueError(
-                f"Unexpected PKR/gram values: gold={gold_pkr_gram}, silver={silver_pkr_gram}"
-            )
+            # Fallback: gold:silver ratio ~80:1 (approximate)
+            silver_usd_oz = gold_usd_oz / Decimal("80")
+            print("[metal_rate_scheduler] XAG not in er-api response — using gold/80 ratio for silver")
 
         usd_to_pkr = Decimal(str(fx_data.get("rates", {}).get("PKR", 0)))
         if usd_to_pkr <= 0:
             raise ValueError(f"Unexpected USD/PKR rate: {usd_to_pkr}")
 
-        # Back-calculate USD/oz for DB columns (used in live-rates response)
-        gold_usd_oz   = (gold_pkr_gram   * TROY_OZ_GRAMS) / usd_to_pkr
-        silver_usd_oz = (silver_pkr_gram * TROY_OZ_GRAMS) / usd_to_pkr
+        gold_pkr_gram   = (gold_usd_oz   * usd_to_pkr) / TROY_OZ_GRAMS
+        silver_pkr_gram = (silver_usd_oz * usd_to_pkr) / TROY_OZ_GRAMS
+
+        if gold_pkr_gram <= 0 or silver_pkr_gram <= 0:
+            raise ValueError(
+                f"Unexpected PKR/gram values: gold={gold_pkr_gram}, silver={silver_pkr_gram}"
+            )
 
         nisab_gold_pkr   = gold_pkr_gram   * NISAB_GOLD_GRAMS
         nisab_silver_pkr = silver_pkr_gram * NISAB_SILVER_GRAMS
@@ -118,7 +120,7 @@ async def _fetch_and_cache_rates() -> None:
                 silver_pkr_gram  = silver_pkr_gram.quantize(Decimal("0.0001")),
                 nisab_gold_pkr   = nisab_gold_pkr.quantize(Decimal("0.01")),
                 nisab_silver_pkr = nisab_silver_pkr.quantize(Decimal("0.01")),
-                source           = "goldpricez.com (PKR native) + er-api.com",
+                source           = "goldpricez.com (gold) + er-api.com (XAG silver + PKR)",
                 fetched_at       = _utcnow(),
             )
             db.add(row)
