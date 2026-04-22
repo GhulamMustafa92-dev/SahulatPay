@@ -108,8 +108,8 @@ async def upload_cnic(
         select(KycReviewRequest).where(
             KycReviewRequest.user_id == current_user.id,
             KycReviewRequest.status == "pending",
-        )
-    )).scalar_one_or_none()
+        ).order_by(KycReviewRequest.submitted_at.desc())
+    )).scalars().first()
     if existing:
         return {
             "status":      "pending_review",
@@ -265,8 +265,8 @@ async def verify_liveness(
             KycReviewRequest.user_id    == current_user.id,
             KycReviewRequest.review_type == "liveness",
             KycReviewRequest.status      == "pending",
-        )
-    )).scalar_one_or_none()
+        ).order_by(KycReviewRequest.submitted_at.desc())
+    )).scalars().first()
     if existing_pending:
         return {
             "status":     "pending_review",
@@ -277,13 +277,13 @@ async def verify_liveness(
     selfie_bytes = await selfie.read()
     _check_file_size(selfie_bytes, "Selfie")
 
-    # Retrieve CNIC front from DB to get the public_id
+    # Retrieve CNIC front from DB to get the public_id (pick most recent if multiple exist)
     cnic_front_doc = (await db.execute(
         select(Document).where(
             Document.user_id       == current_user.id,
             Document.document_type == "cnic_front",
-        ).order_by(Document.uploaded_at.desc())
-    )).scalar_one_or_none()
+        ).order_by(Document.uploaded_at.desc()).limit(1)
+    )).scalars().first()
 
     if not cnic_front_doc:
         raise HTTPException(400, "CNIC front image not found. Please re-upload your CNIC.")
@@ -379,8 +379,8 @@ async def submit_fingerprint(
             KycReviewRequest.user_id    == current_user.id,
             KycReviewRequest.review_type == "fingerprint",
             KycReviewRequest.status      == "pending",
-        )
-    )).scalar_one_or_none()
+        ).order_by(KycReviewRequest.submitted_at.desc())
+    )).scalars().first()
     if existing_pending:
         return {
             "status":  "pending_review",
@@ -460,8 +460,8 @@ async def kyc_status(
             KycReviewRequest.user_id    == current_user.id,
             KycReviewRequest.review_type == "cnic",
         )
-        .order_by(KycReviewRequest.submitted_at.desc())
-    )).scalar_one_or_none()
+        .order_by(KycReviewRequest.submitted_at.desc()).limit(1)
+    )).scalars().first()
 
     # Latest liveness review
     latest_liveness_review = (await db.execute(
@@ -470,8 +470,8 @@ async def kyc_status(
             KycReviewRequest.user_id    == current_user.id,
             KycReviewRequest.review_type == "liveness",
         )
-        .order_by(KycReviewRequest.submitted_at.desc())
-    )).scalar_one_or_none()
+        .order_by(KycReviewRequest.submitted_at.desc()).limit(1)
+    )).scalars().first()
 
     # Latest fingerprint review
     latest_fingerprint_review = (await db.execute(
@@ -480,8 +480,8 @@ async def kyc_status(
             KycReviewRequest.user_id    == current_user.id,
             KycReviewRequest.review_type == "fingerprint",
         )
-        .order_by(KycReviewRequest.submitted_at.desc())
-    )).scalar_one_or_none()
+        .order_by(KycReviewRequest.submitted_at.desc()).limit(1)
+    )).scalars().first()
 
     def _review_dict(r):
         if not r:
