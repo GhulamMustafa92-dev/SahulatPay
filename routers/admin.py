@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, update, desc, and_
+from sqlalchemy import select, func, update, desc, and_, cast, Date
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -108,6 +108,50 @@ async def dashboard(
     pending_biz    = (await db.execute(select(func.count(BusinessProfile.id)).where(BusinessProfile.verification_status == "under_review"))).scalar() or 0
     unread_notifs  = (await db.execute(select(func.count(Notification.id)).where(Notification.is_read == False))).scalar() or 0
 
+    seven_days_ago = _utcnow() - timedelta(days=7)
+
+    # Time series & revenue (last 7 days completed transactions)
+    q_vol = select(
+        cast(Transaction.created_at, Date).label("date"),
+        func.sum(Transaction.amount).label("total")
+    ).where(
+        Transaction.created_at >= seven_days_ago,
+        Transaction.status == "completed"
+    ).group_by(cast(Transaction.created_at, Date)).order_by(cast(Transaction.created_at, Date))
+    res_vol = (await db.execute(q_vol)).all()
+    
+    time_series = [{"date": r.date.strftime("%a"), "value": float(r.total)} for r in res_vol]
+    weekly_revenue = [{"date": r.date.strftime("%a"), "value": float(r.total)} for r in res_vol]
+
+    # Buyer categories
+    q_cat = select(User.account_type, func.count(User.id)).group_by(User.account_type)
+    res_cat = (await db.execute(q_cat)).all()
+    category_data = [{"name": (r.account_type or "Unknown").title(), "value": r[1]} for r in res_cat]
+
+    # Purpose breakdown
+    q_pur = select(Transaction.purpose, func.count(Transaction.id)).where(Transaction.purpose != None).group_by(Transaction.purpose).order_by(desc(func.count(Transaction.id))).limit(6)
+    res_pur = (await db.execute(q_pur)).all()
+    purpose_breakdown = [{"name": r.purpose.title(), "count": r[1]} for r in res_pur]
+
+    # Transaction health
+    q_sts = select(Transaction.status, func.count(Transaction.id)).group_by(Transaction.status)
+    res_sts = (await db.execute(q_sts)).all()
+    health_data = []
+    color_map = {
+        "completed": "#22c55e",
+        "failed": "#f87171",
+        "blocked": "#ef4444",
+        "pending": "#facc15",
+        "under_review": "#fb923c"
+    }
+    for r in res_sts:
+        cat_name = (r.status or "unknown").title()
+        health_data.append({
+            "name": cat_name,
+            "value": r[1],
+            "color": color_map.get(r.status, "#94a3b8")
+        })
+
     return {
         "total_users":          total_users,
         "active_users":         active_users,
@@ -119,6 +163,11 @@ async def dashboard(
         "pending_business":     pending_biz,
         "unread_notifications": unread_notifs,
         "generated_at":         _utcnow().isoformat(),
+        "time_series":          time_series,
+        "weekly_revenue":       weekly_revenue,
+        "category_data":        category_data,
+        "purpose_breakdown":    purpose_breakdown,
+        "health_data":          health_data,
     }
 
 

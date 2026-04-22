@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     FACE_API_KEY: str = ""
     FACE_API_SECRET: str = ""
 
+    # ── METAL RATES — goldpricez.com ─────────────────────────────────────────
+    GOLDPRICEZ_API_KEY: str = "af44776048953adc613205d9c8a5ff3aaf447760"
+
     # ── STRIPE ────────────────────────────────────────────────────────────────────
     STRIPE_SECRET_KEY: str = ""
     STRIPE_PUBLISHABLE_KEY: str = ""

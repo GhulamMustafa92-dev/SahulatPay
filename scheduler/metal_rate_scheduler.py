@@ -1,6 +1,10 @@
 """Metal rate scheduler — fetches live gold/silver prices every hour
 and saves to metal_rate_cache. This is the ONLY place that calls the external
-metals API. The Zakat endpoints read from this cache instead."""
+metals API. The Zakat endpoints read from this cache instead.
+
+Source: goldpricez.com (PKR per gram, native — no manual conversion needed)
+        open.er-api.com  (USD→PKR, used only to back-calculate USD/oz for storage)
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -11,6 +15,7 @@ import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from config import settings
 from database import AsyncSessionLocal
 from models.zakat import MetalRateCache
 
@@ -20,8 +25,9 @@ NISAB_GOLD_GRAMS   = Decimal("87.48")
 NISAB_SILVER_GRAMS = Decimal("612.36")
 TROY_OZ_GRAMS      = Decimal("31.1035")
 
-_METALS_URL = "https://api.metals.live/v1/spot/gold,silver"
-_FX_URL     = "https://open.er-api.com/v6/latest/USD"
+# goldpricez.com — returns PKR/gram directly (supports tola-pakistan, masha, etc.)
+_GOLDPRICEZ_URL = "https://goldpricez.com/api/rates/currency/pkr/measure/gram/metal/all"
+_FX_URL         = "https://open.er-api.com/v6/latest/USD"
 
 
 def _utcnow() -> datetime:
@@ -30,17 +36,18 @@ def _utcnow() -> datetime:
 
 async def _fetch_and_cache_rates() -> None:
     """
-    Fetch gold/silver USD/oz from metals.live and USD→PKR from er-api.com.
-    Compute PKR/gram and nisab thresholds, then INSERT a new MetalRateCache row.
-    On ANY API failure: log error, do not save — previous cache row remains.
+    Fetch gold/silver PKR/gram directly from goldpricez.com (Pakistan market prices).
+    Also fetch USD→PKR from er-api.com to back-calculate USD/oz for DB storage.
+    INSERT a new MetalRateCache row on success; on failure keep previous cache row.
     """
     print(f"[metal_rate_scheduler] fetching rates @ {_utcnow().isoformat()}")
 
     try:
+        headers = {"X-API-KEY": settings.GOLDPRICEZ_API_KEY}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-            async with session.get(_METALS_URL) as metals_resp:
+            async with session.get(_GOLDPRICEZ_URL, headers=headers) as metals_resp:
                 if metals_resp.status != 200:
-                    raise ValueError(f"metals.live returned HTTP {metals_resp.status}")
+                    raise ValueError(f"goldpricez.com returned HTTP {metals_resp.status}")
                 metals_data = await metals_resp.json()
 
             async with session.get(_FX_URL) as fx_resp:
@@ -56,23 +63,26 @@ async def _fetch_and_cache_rates() -> None:
         return
 
     try:
-        gold_usd_oz   = Decimal("0")
-        silver_usd_oz = Decimal("0")
-        for item in metals_data:
-            if item.get("metal") == "gold":
-                gold_usd_oz   = Decimal(str(item.get("price", 0)))
-            elif item.get("metal") == "silver":
-                silver_usd_oz = Decimal(str(item.get("price", 0)))
+        # goldpricez returns {"gold": {"price": <pkr/gram>, ...}, "silver": {"price": <pkr/gram>, ...}}
+        gold_data   = metals_data.get("gold",   {})
+        silver_data = metals_data.get("silver", {})
 
-        if gold_usd_oz <= 0 or silver_usd_oz <= 0:
-            raise ValueError(f"Unexpected metal prices: gold={gold_usd_oz}, silver={silver_usd_oz}")
+        gold_pkr_gram   = Decimal(str(gold_data.get("price",   0)))
+        silver_pkr_gram = Decimal(str(silver_data.get("price", 0)))
+
+        if gold_pkr_gram <= 0 or silver_pkr_gram <= 0:
+            raise ValueError(
+                f"Unexpected PKR/gram values: gold={gold_pkr_gram}, silver={silver_pkr_gram}"
+            )
 
         usd_to_pkr = Decimal(str(fx_data.get("rates", {}).get("PKR", 0)))
         if usd_to_pkr <= 0:
             raise ValueError(f"Unexpected USD/PKR rate: {usd_to_pkr}")
 
-        gold_pkr_gram    = (gold_usd_oz   * usd_to_pkr) / TROY_OZ_GRAMS
-        silver_pkr_gram  = (silver_usd_oz * usd_to_pkr) / TROY_OZ_GRAMS
+        # Back-calculate USD/oz for DB columns (used in live-rates response)
+        gold_usd_oz   = (gold_pkr_gram   * TROY_OZ_GRAMS) / usd_to_pkr
+        silver_usd_oz = (silver_pkr_gram * TROY_OZ_GRAMS) / usd_to_pkr
+
         nisab_gold_pkr   = gold_pkr_gram   * NISAB_GOLD_GRAMS
         nisab_silver_pkr = silver_pkr_gram * NISAB_SILVER_GRAMS
 
@@ -85,7 +95,7 @@ async def _fetch_and_cache_rates() -> None:
                 silver_pkr_gram  = silver_pkr_gram.quantize(Decimal("0.0001")),
                 nisab_gold_pkr   = nisab_gold_pkr.quantize(Decimal("0.01")),
                 nisab_silver_pkr = nisab_silver_pkr.quantize(Decimal("0.01")),
-                source           = "metals.live + er-api.com",
+                source           = "goldpricez.com (PKR native) + er-api.com",
                 fetched_at       = _utcnow(),
             )
             db.add(row)
