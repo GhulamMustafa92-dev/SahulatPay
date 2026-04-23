@@ -477,7 +477,6 @@ async def approve_kyc_review(
     else:
         # CNIC approval → Tier 2
         user.cnic_encrypted     = review.cnic_encrypted
-        user.cnic_number        = review.extracted_cnic
         user.cnic_number_masked = review.cnic_masked
         user.cnic_verified      = True
         user.verification_tier  = max(user.verification_tier or 0, 2)

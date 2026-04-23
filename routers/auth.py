@@ -21,7 +21,9 @@ from schemas.auth  import (
     PinLoginRequest, BiometricLoginRequest,
     RefreshRequest, PasswordResetInitiate, PasswordResetComplete,
     PinSetRequest, PinVerifyRequest, MessageResponse,
+    PinResetInitiate, PinResetComplete,
 )
+from services.encryption_service import encrypt, mask_cnic
 from services.auth_service import (
     DEV_OTP_STORE, TIER_LIMITS,
     normalize_phone, extract_age_from_cnic, mask_phone,
@@ -244,7 +246,7 @@ async def otp_verify(request: Request, body: OtpVerifyRequest, db: AsyncSession 
             date_of_birth      = pending.date_of_birth,
             age                = pending.age,
             password_hash      = pending.password_hash,
-            cnic_number        = pending.cnic_number,
+            cnic_encrypted     = encrypt(pending.cnic_number) if pending.cnic_number else None,
             cnic_number_masked = pending.cnic_masked,
             account_type       = pending.account_type,
             verification_tier  = 1,
@@ -669,6 +671,47 @@ async def pin_verify(body: PinVerifyRequest, db: AsyncSession = Depends(get_db),
     user.login_attempts = 0
     await db.commit()
     return MessageResponse(message="PIN verified")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PIN RESET — forgot MPIN
+# ══════════════════════════════════════════════════════════════════════════════
+@router.post("/pin/reset/initiate", response_model=MessageResponse)
+@limiter.limit("5/hour")
+async def pin_reset_initiate(
+    request: Request, body: PinResetInitiate, db: AsyncSession = Depends(get_db),
+):
+    try:
+        phone = normalize_phone(body.phone)
+        user = (await db.execute(select(User).where(User.phone_number == phone))).scalar_one_or_none()
+        if user and not user.is_locked:
+            await _generate_and_send_otp(db, phone, "security_change")
+    except Exception:
+        pass
+    return MessageResponse(message="If the phone is registered, an OTP has been sent.")
+
+
+@router.post("/pin/reset/complete", response_model=MessageResponse)
+async def pin_reset_complete(body: PinResetComplete, db: AsyncSession = Depends(get_db)):
+    try:
+        phone = normalize_phone(body.phone)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    ok = await _verify_and_consume_otp(db, phone, body.otp, "security_change")
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+
+    user = (await db.execute(select(User).where(User.phone_number == phone))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    user.pin_hash       = hash_pin(body.new_pin)
+    user.login_attempts = 0
+    user.is_locked      = False
+    await db.commit()
+    DEV_OTP_STORE.pop(phone, None)
+    return MessageResponse(message="MPIN reset successfully. Please log in again.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -120,6 +120,16 @@ class PinVerifyRequest(BaseModel):
     pin: str = Field(..., min_length=4, max_length=6, pattern=r"^\d{4,6}$")
 
 
+class PinResetInitiate(BaseModel):
+    phone: str
+
+
+class PinResetComplete(BaseModel):
+    phone:   str
+    otp:     str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
+    new_pin: str = Field(..., min_length=4, max_length=6, pattern=r"^\d{4,6}$")
+
+
 # ── Generic ───────────────────────────────────────────────────────────────────
 class MessageResponse(BaseModel):
     message: str
