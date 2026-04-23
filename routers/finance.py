@@ -275,39 +275,51 @@ async def create_insurance(
     await _verify_pin(current_user, body.pin)
     pol_num = "POL-" + "".join(random.choices(string.digits, k=8))
     ref = generate_reference()
-    wallet = await _deduct(
-        db, current_user.id, body.premium, ref,
-        "bill", "Insurance",
-        f"Insurance premium: {body.plan_name} ({body.policy_type})",
-        {"policy_type": body.policy_type, "plan_name": body.plan_name},
-        account_type="insurance_pool",
-    )
-    policy = InsurancePolicy(
-        user_id=current_user.id,
-        policy_type=body.policy_type,
-        plan_name=body.plan_name,
-        policy_number=pol_num,
-        premium=body.premium,
-        premium_paid=body.premium,
-        coverage=body.coverage,
-        expires_at=body.expires_at,
-        policy_start=_utcnow(),
-        policy_end=body.expires_at,
-        status="active",
-    )
-    db.add(policy)
-    await db.commit()
-    await db.refresh(policy)
+    try:
+        wallet = await _deduct(
+            db, current_user.id, body.premium, ref,
+            "bill", "Insurance",
+            f"Insurance premium: {body.plan_name} ({body.policy_type})",
+            {"policy_type": body.policy_type, "plan_name": body.plan_name},
+            account_type="insurance_pool",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(503, f"Insurance pool not ready — run: alembic upgrade heads ({exc})") from exc
+
+    try:
+        policy = InsurancePolicy(
+            user_id=current_user.id,
+            policy_type=body.policy_type,
+            plan_name=body.plan_name,
+            policy_number=pol_num,
+            premium=body.premium,
+            premium_paid=body.premium,
+            coverage=body.coverage,
+            expires_at=body.expires_at,
+            policy_start=_utcnow(),
+            policy_end=body.expires_at,
+            status="active",
+        )
+        db.add(policy)
+        await db.commit()
+        await db.refresh(policy)
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(503, f"Insurance table missing columns — run: alembic upgrade heads ({exc})") from exc
+
     return {
         "id":                  str(policy.id),
         "policy_type":         policy.policy_type,
         "plan_name":           policy.plan_name,
-        "policy_number":       policy.policy_number,
+        "policy_number":       getattr(policy, "policy_number", pol_num),
         "premium":             str(policy.premium),
         "coverage":            str(policy.coverage),
         "status":              policy.status,
-        "auto_deduct_enabled": policy.auto_deduct_enabled,
-        "auto_deduct_freq":    policy.auto_deduct_freq,
+        "auto_deduct_enabled": getattr(policy, "auto_deduct_enabled", False),
+        "auto_deduct_freq":    getattr(policy, "auto_deduct_freq", "monthly"),
         "new_balance":         str(wallet.balance),
         "message":             f"Insurance policy '{body.plan_name}' activated. Policy No: {pol_num}",
     }

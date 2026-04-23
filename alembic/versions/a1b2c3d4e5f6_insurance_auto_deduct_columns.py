@@ -1,13 +1,13 @@
 """insurance auto_deduct and policy_number columns
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: f1e2d3c4b5a6
 Revises: d4e5f6a7b8c9
 Create Date: 2025-04-23 10:00:00.000000
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = 'a1b2c3d4e5f6'
+revision = 'f1e2d3c4b5a6'
 down_revision = 'd4e5f6a7b8c9'
 branch_labels = None
 depends_on = None
