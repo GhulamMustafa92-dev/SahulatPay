@@ -18,10 +18,14 @@ UTILITY_COMPANIES = {
     "iesco":      "Islamabad Electric Supply Company",
     "fesco":      "Faisalabad Electric Supply Company",
     "mepco":      "Multan Electric Power Company",
+    "pesco":      "Peshawar Electric Supply Company",
+    "hesco":      "Hyderabad Electric Supply Company",
     "wapda":      "WAPDA",
     "ptcl":       "PTCL",
     "stormfiber": "StormFiber Internet",
     "nayatel":    "Nayatel",
+    "telenor_bb": "Telenor Broadband",
+    "jazz_bb":    "Jazz Home Internet",
     "sui_gas":    "Sui Gas (General)",
     "water":      "Water & Sanitation Agency",
 }
@@ -34,6 +38,9 @@ CHALLAN_DEPTS = {
     "NADRA":     "NADRA",
     "Municipal": "Municipal Corporation",
     "BISP":      "Benazir Income Support Programme",
+    "SRB":       "Sindh Revenue Board",
+    "PRA":       "Punjab Revenue Authority",
+    "Motor":     "Motor Vehicle Registration",
 }
 
 

@@ -28,23 +28,45 @@ def seed_wallet_accounts(db):
     if db.query(MockWalletAccount).count() > 0:
         return
     accounts = [
-        ("jazzcash",  "+923001234567", "Ali Hassan",         8500),
-        ("jazzcash",  "+923009876543", "Sara Khan",          12000),
-        ("jazzcash",  "+923001112233", "Muhammad Asif",      3200),
-        ("jazzcash",  "+923004445566", "Fatima Malik",       25000),
-        ("easypaisa", "+923101234567", "Usman Iqbal",        7800),
-        ("easypaisa", "+923109876543", "Ayesha Raza",        15500),
-        ("easypaisa", "+923101112233", "Bilal Ahmed",        4100),
-        ("easypaisa", "+923104445566", "Nadia Siddiqui",     9000),
-        ("sadapay",   "+923201234567", "Hamza Tariq",        31000),
-        ("sadapay",   "+923209876543", "Zainab Ali",         5500),
-        ("sadapay",   "+923201112233", "Omer Farooq",        18000),
-        ("nayapay",   "+923301234567", "Rabia Noor",         22000),
-        ("nayapay",   "+923309876543", "Kamran Sheikh",      11000),
-        ("nayapay",   "+923301112233", "Sana Butt",          6700),
-        ("upaisa",    "+923321234567", "Waqas Hussain",      4500),
-        ("upaisa",    "+923329876543", "Hina Javed",         13500),
-        ("upaisa",    "+923321112233", "Tariq Mehmood",      28000),
+        # JazzCash
+        ("jazzcash",  "+923001234567", "Ali Hassan",            8500),
+        ("jazzcash",  "+923009876543", "Sara Khan",             12000),
+        ("jazzcash",  "+923001112233", "Muhammad Asif",         3200),
+        ("jazzcash",  "+923004445566", "Fatima Malik",          25000),
+        ("jazzcash",  "+923007788990", "Shahid Afridi",         9800),
+        ("jazzcash",  "+923003344556", "Iqra Aziz",             6400),
+        ("jazzcash",  "+923006677889", "Babar Azam",            19500),
+        ("jazzcash",  "+923002233445", "Nimra Khan",            4700),
+        # EasyPaisa
+        ("easypaisa", "+923101234567", "Usman Iqbal",           7800),
+        ("easypaisa", "+923109876543", "Ayesha Raza",           15500),
+        ("easypaisa", "+923101112233", "Bilal Ahmed",           4100),
+        ("easypaisa", "+923104445566", "Nadia Siddiqui",        9000),
+        ("easypaisa", "+923108899001", "Asad Ali",              11200),
+        ("easypaisa", "+923105566778", "Hira Baig",             6300),
+        ("easypaisa", "+923102233445", "Zohaib Hassan",         22000),
+        ("easypaisa", "+923106677889", "Sadaf Kanwal",          3900),
+        # SadaPay
+        ("sadapay",   "+923201234567", "Hamza Tariq",           31000),
+        ("sadapay",   "+923209876543", "Zainab Ali",            5500),
+        ("sadapay",   "+923201112233", "Omer Farooq",           18000),
+        ("sadapay",   "+923205566778", "Arslan Naseer",         14000),
+        ("sadapay",   "+923208899001", "Maryam Nawaz",          27500),
+        ("sadapay",   "+923202233445", "Fawad Khan",            8900),
+        # NayaPay
+        ("nayapay",   "+923301234567", "Rabia Noor",            22000),
+        ("nayapay",   "+923309876543", "Kamran Sheikh",         11000),
+        ("nayapay",   "+923301112233", "Sana Butt",             6700),
+        ("nayapay",   "+923305566778", "Danish Taimoor",        16500),
+        ("nayapay",   "+923308899001", "Aiman Zaman",           9300),
+        ("nayapay",   "+923302233445", "Junaid Khan",           4200),
+        # UPaisa
+        ("upaisa",    "+923321234567", "Waqas Hussain",         4500),
+        ("upaisa",    "+923329876543", "Hina Javed",            13500),
+        ("upaisa",    "+923321112233", "Tariq Mehmood",         28000),
+        ("upaisa",    "+923325566778", "Shehzad Roy",           7600),
+        ("upaisa",    "+923328899001", "Mehwish Hayat",         19000),
+        ("upaisa",    "+923322233445", "Adnan Siddiqui",        5100),
     ]
     for provider, phone, name, balance in accounts:
         db.add(MockWalletAccount(provider=provider, phone=phone, name=name, balance=balance))
@@ -54,20 +76,52 @@ def seed_bank_accounts(db):
     if db.query(MockBankAccount).count() > 0:
         return
     accounts = [
+        # HBL
         ("hbl",        "01234567890123", "PK36HABB0000001234567890", "Muhammad Ghulam Mustafa", 125000),
         ("hbl",        "01234567891234", "PK36HABB0000001234567891", "Amna Tariq",               75000),
+        ("hbl",        "01234567892345", "PK36HABB0000001234567892", "Kamran Akbar",             190000),
+        # MCB
         ("mcb",        "1234567890",     "PK24MUCB0002460078000034", "Rashid Karim",             250000),
-        ("mcb",        "9876543210",     "PK24MUCB0002460078000035", "Shazia Rehman",            88000),
+        ("mcb",        "9876543210",     "PK24MUCB0002460078000035", "Shazia Rehman",             88000),
+        ("mcb",        "5555666677",     "PK24MUCB0002460078000036", "Tariq Hussain",            135000),
+        # UBL
         ("ubl",        "0011223344556",  "PK60UNIL0109000000123456", "Faisal Naeem",             180000),
-        ("ubl",        "6655443322110",  "PK60UNIL0109000000123457", "Mariam Zahid",             45000),
+        ("ubl",        "6655443322110",  "PK60UNIL0109000000123457", "Mariam Zahid",              45000),
+        ("ubl",        "1122334455667",  "PK60UNIL0109000000123458", "Sajid Mehmood",            220000),
+        # Meezan
         ("meezan",     "02012345678901", "PK07MEZN0001090109876543", "Abdul Rehman",             320000),
-        ("meezan",     "02012345678902", "PK07MEZN0001090109876544", "Khadija Hussain",          95000),
+        ("meezan",     "02012345678902", "PK07MEZN0001090109876544", "Khadija Hussain",           95000),
+        ("meezan",     "02012345678903", "PK07MEZN0001090109876545", "Aamir Liaqat",             175000),
+        # Allied
         ("allied",     "10020012345678", "PK55ABPA0010020012345678", "Imran Butt",               160000),
+        ("allied",     "10020087654321", "PK55ABPA0010020087654321", "Saima Khalid",              68000),
+        # Alfalah
         ("alfalah",    "0110123456789",  "PK29ALFH0010001000684560", "Sobia Khalid",             210000),
-        ("faysal",     "0001012345678",  "PK45FAYS3756220600000001", "Junaid Shah",              55000),
+        ("alfalah",    "0110987654321",  "PK29ALFH0010001000684561", "Nauman Ijaz",              115000),
+        # Faysal
+        ("faysal",     "0001012345678",  "PK45FAYS3756220600000001", "Junaid Shah",               55000),
+        ("faysal",     "0001087654321",  "PK45FAYS3756220600000002", "Farah Naz",                 92000),
+        # Habib Metro
         ("habibmetro", "0101234567890",  "PK38MPBL0000001234000001", "Rabia Anwar",              140000),
-        ("js",         "1001234567890",  "PK07JSBL9999888000000001", "Salman Akhtar",            77000),
+        ("habibmetro", "0109876543210",  "PK38MPBL0000001234000002", "Asif Zardari Jr",           83000),
+        # JS Bank
+        ("js",         "1001234567890",  "PK07JSBL9999888000000001", "Salman Akhtar",             77000),
+        ("js",         "1009876543210",  "PK07JSBL9999888000000002", "Nadia Hussain",             49000),
+        # SCB
         ("scb",        "01234567-8",     "PK05SCBL0000001123456702", "Natasha Mirza",            410000),
+        ("scb",        "09876543-2",     "PK05SCBL0000001123456703", "Bilal Chaudhry",           265000),
+        # Silk Bank (new)
+        ("silk",       "SLK-0001234",    "PK71SILK0001000001234567", "Arshad Waheed",             58000),
+        ("silk",       "SLK-0005678",    "PK71SILK0001000005678901", "Uzma Gillani",              34000),
+        # Askari Bank (new)
+        ("askari",     "ASK-1122334",    "PK07ASCM0000001122334455", "Capt Waqas Retd",           99000),
+        ("askari",     "ASK-5566778",    "PK07ASCM0000005566778899", "Rubab Iqbal",               47000),
+        # Soneri Bank (new)
+        ("soneri",     "SON-2233445",    "PK56SONE0002233445566677", "Ghulam Abbas",              72000),
+        ("soneri",     "SON-6677889",    "PK56SONE0006677889900112", "Kishwar Naheed",             31000),
+        # Bank Al-Habib (new)
+        ("bahl",       "BAHL-001234",    "PK61BAHL0001000001234567", "Syed Omer Farooq",         185000),
+        ("bahl",       "BAHL-005678",    "PK61BAHL0001000005678901", "Amna Babar",                63000),
     ]
     for bank, acct, iban, title, bal in accounts:
         db.add(MockBankAccount(bank_code=bank, account_number=acct, iban=iban, account_title=title, balance=bal))
@@ -78,24 +132,59 @@ def seed_bills(db):
         return
     today = date.today()
     bills = [
-        ("ssgc",       "1234567890", "Muhammad Tariq",    3250.50,  str(today + timedelta(days=5)),  "March 2026"),
-        ("ssgc",       "0987654321", "Fatima Baig",       1890.00,  str(today + timedelta(days=8)),  "March 2026"),
-        ("sngpl",      "1122334455", "Khalid Mahmood",    4100.75,  str(today + timedelta(days=3)),  "March 2026"),
-        ("sngpl",      "5544332211", "Samina Akhtar",     2750.00,  str(today + timedelta(days=12)), "March 2026"),
-        ("kelectric",  "KE-001-001", "Rizwan Ahmed",      6500.25,  str(today + timedelta(days=6)),  "March 2026"),
-        ("kelectric",  "KE-002-002", "Huma Farooq",       9200.00,  str(today + timedelta(days=9)),  "March 2026"),
-        ("lesco",      "LE-0001234", "Naveed Anwar",      7800.50,  str(today + timedelta(days=4)),  "March 2026"),
-        ("lesco",      "LE-0005678", "Asma Raza",         5100.00,  str(today + timedelta(days=7)),  "March 2026"),
-        ("iesco",      "IE-1234567", "Waseem Haider",     4300.25,  str(today + timedelta(days=10)), "March 2026"),
-        ("fesco",      "FE-7654321", "Amjad Ali",         3600.75,  str(today + timedelta(days=5)),  "March 2026"),
-        ("mepco",      "ME-1234567", "Rukhsana Bibi",     2900.00,  str(today + timedelta(days=15)), "March 2026"),
-        ("ptcl",       "92511234567","Arshad Hussain",    1500.00,  str(today + timedelta(days=8)),  "March 2026"),
-        ("ptcl",       "92519876543","Shaista Naz",       2200.00,  str(today + timedelta(days=11)), "March 2026"),
-        ("stormfiber", "SF-000111",  "Hamid Sheikh",      3000.00,  str(today + timedelta(days=3)),  "April 2026"),
-        ("stormfiber", "SF-000222",  "Lubna Qureshi",     4500.00,  str(today + timedelta(days=6)),  "April 2026"),
-        ("nayatel",    "NT-00123",   "Pervez Iqbal",      2800.00,  str(today + timedelta(days=7)),  "April 2026"),
-        ("wapda",      "WA-0012345", "Tahir Bhatti",      8900.50,  str(today + timedelta(days=5)),  "March 2026"),
-        ("wapda",      "WA-0054321", "Nargis Begum",      6700.00,  str(today + timedelta(days=9)),  "March 2026"),
+        # SSGC
+        ("ssgc",       "1234567890",  "Muhammad Tariq",    3250.50,  str(today + timedelta(days=5)),  "March 2026"),
+        ("ssgc",       "0987654321",  "Fatima Baig",       1890.00,  str(today + timedelta(days=8)),  "March 2026"),
+        ("ssgc",       "1122334455",  "Irfan Siddiqui",    2640.00,  str(today + timedelta(days=12)), "April 2026"),
+        ("ssgc",       "9988776655",  "Sadia Rasheed",     4100.00,  str(today + timedelta(days=6)),  "April 2026"),
+        # SNGPL
+        ("sngpl",      "1122334455",  "Khalid Mahmood",    4100.75,  str(today + timedelta(days=3)),  "March 2026"),
+        ("sngpl",      "5544332211",  "Samina Akhtar",     2750.00,  str(today + timedelta(days=12)), "March 2026"),
+        ("sngpl",      "2233445566",  "Aslam Niazi",       3300.00,  str(today + timedelta(days=9)),  "April 2026"),
+        ("sngpl",      "6677889900",  "Razia Sultana",     1980.00,  str(today + timedelta(days=14)), "April 2026"),
+        # K-Electric
+        ("kelectric",  "KE-001-001",  "Rizwan Ahmed",      6500.25,  str(today + timedelta(days=6)),  "March 2026"),
+        ("kelectric",  "KE-002-002",  "Huma Farooq",       9200.00,  str(today + timedelta(days=9)),  "March 2026"),
+        ("kelectric",  "KE-003-003",  "Shoaib Malik",      5700.00,  str(today + timedelta(days=7)),  "April 2026"),
+        ("kelectric",  "KE-004-004",  "Zubaida Tariq",     8100.50,  str(today + timedelta(days=11)), "April 2026"),
+        # LESCO
+        ("lesco",      "LE-0001234",  "Naveed Anwar",      7800.50,  str(today + timedelta(days=4)),  "March 2026"),
+        ("lesco",      "LE-0005678",  "Asma Raza",         5100.00,  str(today + timedelta(days=7)),  "March 2026"),
+        ("lesco",      "LE-0009012",  "Babar Rana",        6200.00,  str(today + timedelta(days=10)), "April 2026"),
+        ("lesco",      "LE-0003456",  "Shagufta Perveen",  4350.00,  str(today + timedelta(days=5)),  "April 2026"),
+        # IESCO
+        ("iesco",      "IE-1234567",  "Waseem Haider",     4300.25,  str(today + timedelta(days=10)), "March 2026"),
+        ("iesco",      "IE-9876543",  "Misbah Ul Haq",     3800.00,  str(today + timedelta(days=8)),  "April 2026"),
+        # FESCO
+        ("fesco",      "FE-7654321",  "Amjad Ali",         3600.75,  str(today + timedelta(days=5)),  "March 2026"),
+        ("fesco",      "FE-1234567",  "Rukhsana Parveen",  2850.00,  str(today + timedelta(days=13)), "April 2026"),
+        # MEPCO
+        ("mepco",      "ME-1234567",  "Rukhsana Bibi",     2900.00,  str(today + timedelta(days=15)), "March 2026"),
+        ("mepco",      "ME-9876543",  "Ghulam Rasool",     3450.00,  str(today + timedelta(days=18)), "April 2026"),
+        # PESCO
+        ("pesco",      "PE-0011223",  "Shah Faisal",       4700.00,  str(today + timedelta(days=7)),  "March 2026"),
+        ("pesco",      "PE-0044556",  "Nusrat Begum",      3100.00,  str(today + timedelta(days=10)), "April 2026"),
+        # HESCO
+        ("hesco",      "HE-1122334",  "Ali Gohar",         5200.00,  str(today + timedelta(days=8)),  "March 2026"),
+        ("hesco",      "HE-5566778",  "Marvi Memon",       4600.00,  str(today + timedelta(days=12)), "April 2026"),
+        # PTCL
+        ("ptcl",       "92511234567", "Arshad Hussain",    1500.00,  str(today + timedelta(days=8)),  "March 2026"),
+        ("ptcl",       "92519876543", "Shaista Naz",       2200.00,  str(today + timedelta(days=11)), "March 2026"),
+        ("ptcl",       "92513344556", "Zahid Hamid",       1800.00,  str(today + timedelta(days=9)),  "April 2026"),
+        # StormFiber
+        ("stormfiber", "SF-000111",   "Hamid Sheikh",      3000.00,  str(today + timedelta(days=3)),  "April 2026"),
+        ("stormfiber", "SF-000222",   "Lubna Qureshi",     4500.00,  str(today + timedelta(days=6)),  "April 2026"),
+        ("stormfiber", "SF-000333",   "Rashid Minhas",     3500.00,  str(today + timedelta(days=8)),  "May 2026"),
+        # Nayatel
+        ("nayatel",    "NT-00123",    "Pervez Iqbal",      2800.00,  str(today + timedelta(days=7)),  "April 2026"),
+        ("nayatel",    "NT-00456",    "Saira Bano",        3200.00,  str(today + timedelta(days=10)), "May 2026"),
+        # WAPDA
+        ("wapda",      "WA-0012345",  "Tahir Bhatti",      8900.50,  str(today + timedelta(days=5)),  "March 2026"),
+        ("wapda",      "WA-0054321",  "Nargis Begum",      6700.00,  str(today + timedelta(days=9)),  "March 2026"),
+        ("wapda",      "WA-0098765",  "Imtiaz Ahmad",      7400.00,  str(today + timedelta(days=6)),  "April 2026"),
+        # Sui Southern (SSGCL broadband)
+        ("telenor_bb", "TNR-001122",  "Asim Bajwa",        1200.00,  str(today + timedelta(days=5)),  "April 2026"),
+        ("jazz_bb",    "JZZ-334455",  "Ayesha Gulzar",      950.00,  str(today + timedelta(days=7)),  "April 2026"),
     ]
     for company, cid, name, amount, due, month in bills:
         db.add(MockBill(company=company, consumer_id=cid, customer_name=name,
