@@ -228,13 +228,15 @@ def decode_token(token: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 # FastAPI dependencies
 # ══════════════════════════════════════════════════════════════════════════════
-bearer_scheme = HTTPBearer(auto_error=True)
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     payload = decode_token(credentials.credentials)
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Not an access token")

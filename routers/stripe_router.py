@@ -205,13 +205,14 @@ async def sandbox_topup(
         stripe = _get_stripe()
         try:
             intent = stripe.PaymentIntent.create(
-                amount         = int(body.amount_pkr * 100),
-                currency       = "usd",
-                payment_method = "pm_card_visa",
-                confirm        = True,
-                return_url     = "https://sahulatpay.app/stripe/return",
-                description    = body.description,
-                metadata       = {
+                amount               = max(50, int(body.amount_pkr * 100)),
+                currency             = "usd",
+                payment_method       = "pm_card_visa",
+                payment_method_types = ["card"],
+                confirm              = True,
+                return_url           = "https://sahulatpay.app/stripe/return",
+                description          = body.description,
+                metadata             = {
                     "user_id":    str(current_user.id),
                     "phone":      current_user.phone_number,
                     "sandbox":    "true",

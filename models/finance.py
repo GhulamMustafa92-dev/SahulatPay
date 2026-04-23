@@ -33,20 +33,24 @@ class Investment(Base):
 class InsurancePolicy(Base):
     __tablename__ = "insurance_policies"
 
-    id           = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
-    user_id      = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    policy_type  = Column(String(100), nullable=False)
-    plan_name    = Column(String(255), nullable=False)
-    premium      = Column(Numeric(10, 2), nullable=False)
-    premium_paid = Column(Numeric(10, 2), nullable=True)   # actual amount deducted (for refund calc)
-    coverage     = Column(Numeric(12, 2), nullable=False)
-    status       = Column(String(20), server_default="active")   # active | cancelled | expired
-    policy_start = Column(DateTime(timezone=True), server_default=func.now())
-    policy_end   = Column(DateTime(timezone=True), nullable=True)  # same as expires_at
-    activated_at = Column(DateTime(timezone=True), server_default=func.now())
-    expires_at   = Column(DateTime(timezone=True))
-    cancelled_at = Column(DateTime(timezone=True))
-    refund_paid  = Column(Numeric(10, 2), nullable=True)   # how much was refunded on cancel
+    id                  = Column(UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id             = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    policy_type         = Column(String(100), nullable=False)
+    plan_name           = Column(String(255), nullable=False)
+    policy_number       = Column(String(50), nullable=True)          # e.g. POL-12345678
+    premium             = Column(Numeric(10, 2), nullable=False)
+    premium_paid        = Column(Numeric(10, 2), nullable=True)
+    coverage            = Column(Numeric(12, 2), nullable=False)
+    status              = Column(String(20), server_default="active")  # active | cancelled | expired
+    policy_start        = Column(DateTime(timezone=True), server_default=func.now())
+    policy_end          = Column(DateTime(timezone=True), nullable=True)
+    activated_at        = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at          = Column(DateTime(timezone=True))
+    cancelled_at        = Column(DateTime(timezone=True))
+    refund_paid         = Column(Numeric(10, 2), nullable=True)
+    auto_deduct_enabled = Column(Boolean, server_default="false")
+    auto_deduct_freq    = Column(String(20), server_default="monthly")  # monthly | weekly
+    next_deduction_at   = Column(DateTime(timezone=True), nullable=True)
 
     user = relationship("User", back_populates="insurance_policies")
 

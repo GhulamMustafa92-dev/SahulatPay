@@ -23,6 +23,7 @@ async def _push_fcm(
     body: str,
     data: dict,
     user_id: Optional[UUID] = None,
+    data_only: bool = False,
 ) -> None:
     """
     Fire-and-forget FCM push via firebase-admin.
@@ -41,12 +42,16 @@ async def _push_fcm(
             return
         from firebase_admin import messaging
         import asyncio, functools
+        full_data = {str(k): str(v) for k, v in (data or {}).items()}
+        if not data_only:
+            full_data.update({"title": title, "body": body})
+
         msg = messaging.Message(
-            notification=messaging.Notification(title=title, body=body),
-            data={str(k): str(v) for k, v in (data or {}).items()},
+            notification=None if data_only else messaging.Notification(title=title, body=body),
+            data=full_data,
             android=messaging.AndroidConfig(
                 priority="high",
-                notification=messaging.AndroidNotification(
+                notification=None if data_only else messaging.AndroidNotification(
                     channel_id="sahulatpay_main",
                     priority="high",
                     default_vibrate_timings=True,
@@ -122,7 +127,11 @@ async def send_notification(
 
             user = (await _db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
             if user and user.fcm_token:
-                await _push_fcm(user.fcm_token, title, body, data or {}, user_id=user_id)
+                await _push_fcm(
+                    user.fcm_token, title, body, data or {},
+                    user_id=user_id,
+                    data_only=(type == "split"),
+                )
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("[send_notification] failed for user %s: %s", user_id, exc)

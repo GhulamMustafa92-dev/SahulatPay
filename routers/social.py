@@ -86,7 +86,7 @@ async def create_split(
     if body.split_type == "custom" and abs(total_custom - body.total_amount) > Decimal("0.01"):
         raise HTTPException(400, f"Custom amounts sum ({total_custom}) must equal total_amount ({body.total_amount})")
 
-    equal_share = body.total_amount / len(resolved) if body.split_type == "equal" else None
+    equal_share = body.total_amount / (len(resolved) + 1) if body.split_type == "equal" else None
 
     # Create split
     split = BillSplit(
@@ -124,7 +124,8 @@ async def create_split(
                 db, user.id,
                 title=f"💸 Split Request from {current_user.full_name}",
                 body=f'"{body.title}" — Your share: PKR {amount:,.2f}. Tap to pay.',
-                type="transaction",
+                type="split",
+                data={"split_id": str(split.id), "type": "split"},
             )
         )
 
@@ -268,10 +269,18 @@ async def respond_to_split(
         ))
         return {"status": "declined", "message": "You have declined this split request."}
 
-    # Accept → transfer money from participant to creator
+    # Accept → verify PIN first, then transfer money from participant to creator
     if not body.pin:
         raise HTTPException(400, "PIN required to accept and pay")
 
+    import bcrypt as _bcrypt
+    if not current_user.pin_hash:
+        raise HTTPException(400, "PIN not set. Please set your PIN first in Settings.")
+    if not _bcrypt.checkpw(body.pin.encode(), current_user.pin_hash.encode()):
+        raise HTTPException(401, "Incorrect PIN")
+
+    # PIN verified — call doTransfer with biometric_confirmed=True so large
+    # amounts (>= PKR 1,000) don't get redirected to the biometric flow.
     result = await doTransfer(
         db=db,
         sender_id=current_user.id,
@@ -280,15 +289,8 @@ async def respond_to_split(
         purpose="Other",
         description=f"Split payment: {split.title}",
         pin=body.pin,
-        biometric_confirmed=False,
+        biometric_confirmed=True,
     )
-
-    if result["status"] == "pending_biometric":
-        return {
-            "status":          "pending_biometric",
-            "message":         f"Amount PKR {part.amount:,.2f} ≥ PKR 1,000. Confirm with biometrics.",
-            "pending_tx_token": result["pending_tx_token"],
-        }
 
     part.status  = "paid"
     part.paid_at = _utcnow()
@@ -317,6 +319,30 @@ async def respond_to_split(
         "new_balance": str(result.get("new_balance")),
         "message":     f"PKR {part.amount:,.2f} sent to {split.title} creator.",
     }
+
+
+# ── DELETE /splits/{split_id} ────────────────────────────────────────────────
+@router.delete("/splits/{split_id}", status_code=200)
+async def delete_split(
+    split_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    split = (await db.execute(select(BillSplit).where(BillSplit.id == split_id))).scalar_one_or_none()
+    if not split:
+        raise HTTPException(404, "Split not found")
+    if split.creator_id != current_user.id:
+        raise HTTPException(403, "Only the creator can delete this split")
+
+    # Delete participants first, then the split
+    participants = (await db.execute(
+        select(SplitParticipant).where(SplitParticipant.split_id == split_id)
+    )).scalars().all()
+    for p in participants:
+        await db.delete(p)
+    await db.delete(split)
+    await db.commit()
+    return {"status": "deleted", "message": "Split deleted successfully."}
 
 
 # ── POST /splits/{split_id}/remind ───────────────────────────────────────────
@@ -408,7 +434,7 @@ async def get_trusted_circle(
                 "contact_id":    str(contact.id),
                 "full_name":     contact.full_name,
                 "phone_masked":  _mask_phone(contact.phone_number),
-                "profile_photo": contact.profile_photo,
+                "profile_photo": contact.profile_photo_url,
                 "nickname":      row.nickname,
                 "added_at":      row.added_at.isoformat(),
             })

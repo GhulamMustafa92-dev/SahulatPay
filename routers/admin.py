@@ -94,10 +94,13 @@ async def get_admin_key(current_user: User = Depends(get_current_user)):
 # ══════════════════════════════════════════════════════════════════════════════
 @router.get("/dashboard")
 async def dashboard(
+    days: int = 7,
     admin: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """High-level platform stats."""
+    """High-level platform stats. Pass ?days=7|30|90 for time series range."""
+    days = max(1, min(days, 365))
+
     total_users    = (await db.execute(select(func.count(User.id)))).scalar() or 0
     active_users   = (await db.execute(select(func.count(User.id)).where(User.is_active == True))).scalar() or 0
     locked_users   = (await db.execute(select(func.count(User.id)).where(User.is_locked == True))).scalar() or 0
@@ -108,48 +111,68 @@ async def dashboard(
     pending_biz    = (await db.execute(select(func.count(BusinessProfile.id)).where(BusinessProfile.verification_status == "under_review"))).scalar() or 0
     unread_notifs  = (await db.execute(select(func.count(Notification.id)).where(Notification.is_read == False))).scalar() or 0
 
-    seven_days_ago = _utcnow() - timedelta(days=7)
+    since = _utcnow() - timedelta(days=days)
+    today = _utcnow().date()
 
-    # Time series & revenue (last 7 days completed transactions)
+    # Date label format: short name for 7D, "Apr 23" for 30D+
+    date_fmt = "%a" if days <= 7 else "%b %d"
+
+    # Build full date range so every day in the period appears (even zeros)
+    all_dates = [today - timedelta(days=i) for i in range(days - 1, -1, -1)]
+
+    def _fill_series(db_rows, value_attr: str) -> list:
+        row_map = {r.date: float(getattr(r, value_attr)) for r in db_rows}
+        return [{"date": d.strftime(date_fmt), "value": row_map.get(d, 0.0)} for d in all_dates]
+
+    # Time series — transaction volume over selected period
     q_vol = select(
         cast(Transaction.created_at, Date).label("date"),
         func.sum(Transaction.amount).label("total")
     ).where(
-        Transaction.created_at >= seven_days_ago,
+        Transaction.created_at >= since,
         Transaction.status == "completed"
     ).group_by(cast(Transaction.created_at, Date)).order_by(cast(Transaction.created_at, Date))
     res_vol = (await db.execute(q_vol)).all()
-    
-    time_series = [{"date": r.date.strftime("%a"), "value": float(r.total)} for r in res_vol]
-    weekly_revenue = [{"date": r.date.strftime("%a"), "value": float(r.total)} for r in res_vol]
+    time_series = _fill_series(res_vol, "total")
 
-    # Buyer categories
-    q_cat = select(User.account_type, func.count(User.id)).group_by(User.account_type)
+    # Weekly revenue — transaction fees over selected period
+    q_rev = select(
+        cast(Transaction.created_at, Date).label("date"),
+        func.coalesce(func.sum(Transaction.fee), 0).label("total")
+    ).where(
+        Transaction.created_at >= since,
+        Transaction.status == "completed"
+    ).group_by(cast(Transaction.created_at, Date)).order_by(cast(Transaction.created_at, Date))
+    res_rev = (await db.execute(q_rev)).all()
+    weekly_revenue = _fill_series(res_rev, "total")
+
+    # Category breakdown — transaction type distribution
+    q_cat = select(Transaction.type, func.count(Transaction.id)).group_by(Transaction.type)
     res_cat = (await db.execute(q_cat)).all()
-    category_data = [{"name": (r.account_type or "Unknown").title(), "value": r[1]} for r in res_cat]
+    category_data = [{"name": (r.type or "Unknown").replace("_", " ").title(), "value": r[1]} for r in res_cat]
 
     # Purpose breakdown
     q_pur = select(Transaction.purpose, func.count(Transaction.id)).where(Transaction.purpose != None).group_by(Transaction.purpose).order_by(desc(func.count(Transaction.id))).limit(6)
     res_pur = (await db.execute(q_pur)).all()
-    purpose_breakdown = [{"name": r.purpose.title(), "count": r[1]} for r in res_pur]
+    purpose_breakdown = [{"name": r.purpose.replace("_", " ").title(), "count": r[1]} for r in res_pur]
 
-    # Transaction health
+    # Transaction health — all-time status breakdown
     q_sts = select(Transaction.status, func.count(Transaction.id)).group_by(Transaction.status)
     res_sts = (await db.execute(q_sts)).all()
     health_data = []
     color_map = {
-        "completed": "#22c55e",
-        "failed": "#f87171",
-        "blocked": "#ef4444",
-        "pending": "#facc15",
-        "under_review": "#fb923c"
+        "completed":    "#22c55e",
+        "failed":       "#f87171",
+        "blocked":      "#ef4444",
+        "pending":      "#facc15",
+        "under_review": "#fb923c",
+        "reversed":     "#60a5fa",
     }
     for r in res_sts:
-        cat_name = (r.status or "unknown").title()
         health_data.append({
-            "name": cat_name,
+            "name":  (r.status or "unknown").replace("_", " ").title(),
             "value": r[1],
-            "color": color_map.get(r.status, "#94a3b8")
+            "color": color_map.get(r.status, "#94a3b8"),
         })
 
     return {
@@ -163,6 +186,7 @@ async def dashboard(
         "pending_business":     pending_biz,
         "unread_notifications": unread_notifs,
         "generated_at":         _utcnow().isoformat(),
+        "days":                 days,
         "time_series":          time_series,
         "weekly_revenue":       weekly_revenue,
         "category_data":        category_data,
@@ -932,21 +956,128 @@ async def broadcast_notification(
 # INSURANCE
 # ══════════════════════════════════════════════════════════════════════════════
 @router.get("/insurance")
-async def list_all_insurance(page: int = 1, per_page: int = 25, admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    policies = (await db.execute(
-        select(InsurancePolicy).order_by(desc(InsurancePolicy.activated_at))
-        .offset((page - 1) * per_page).limit(per_page)
-    )).scalars().all()
-    total = (await db.execute(select(func.count(InsurancePolicy.id)))).scalar() or 0
+async def list_all_insurance(
+    page: int = 1, per_page: int = 25,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    thirty_days = now + timedelta(days=30)
+
+    q = (
+        select(InsurancePolicy, User.full_name, User.phone_number)
+        .join(User, User.id == InsurancePolicy.user_id)
+    )
+    if status:
+        q = q.where(InsurancePolicy.status == status)
+    if search:
+        like = f"%{search}%"
+        q = q.where((User.full_name.ilike(like)) | (User.phone_number.ilike(like)))
+
+    total   = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
+    rows    = (await db.execute(q.order_by(desc(InsurancePolicy.activated_at)).offset((page - 1) * per_page).limit(per_page))).all()
+
+    active_count   = (await db.execute(select(func.count(InsurancePolicy.id)).where(InsurancePolicy.status == "active"))).scalar() or 0
+    total_premium  = (await db.execute(select(func.coalesce(func.sum(InsurancePolicy.premium), 0)).where(InsurancePolicy.status == "active"))).scalar() or 0
+    expiring_count = (await db.execute(
+        select(func.count(InsurancePolicy.id))
+        .where(InsurancePolicy.status == "active")
+        .where(InsurancePolicy.expires_at <= thirty_days)
+        .where(InsurancePolicy.expires_at >= now)
+    )).scalar() or 0
+
     return {
         "policies": [
-            {"id": p.id, "user_id": p.user_id, "policy_type": p.policy_type, "plan_name": p.plan_name,
-             "premium": float(p.premium), "coverage": float(p.coverage), "status": p.status,
-             "expires_at": p.expires_at.isoformat() if p.expires_at else None}
-            for p in policies
+            {
+                "id":            str(p.id),
+                "user_id":       str(p.user_id),
+                "user_name":     full_name or "—",
+                "user_phone":    phone or "—",
+                "policy_type":   p.policy_type,
+                "plan_name":     p.plan_name,
+                "policy_number": p.policy_number,
+                "premium":       float(p.premium),
+                "coverage":      float(p.coverage),
+                "status":        p.status,
+                "start_date":    p.policy_start.isoformat() if p.policy_start else (p.activated_at.isoformat() if p.activated_at else None),
+                "expiry_date":   p.expires_at.isoformat() if p.expires_at else None,
+                "activated_at":  p.activated_at.isoformat() if p.activated_at else None,
+                "auto_deduct_enabled": p.auto_deduct_enabled,
+                "auto_deduct_freq":    p.auto_deduct_freq,
+            }
+            for p, full_name, phone in rows
         ],
-        "total": total,
+        "total":                 total,
+        "active_policies":       active_count,
+        "total_premium_monthly": float(total_premium),
+        "expiring_in_30_days":   expiring_count,
+        "claims_this_month":     0,
     }
+
+
+@router.post("/insurance/{policy_id}/cancel")
+async def admin_cancel_insurance(
+    policy_id: UUID,
+    admin: User = Depends(require_admin),
+    db: AsyncSession  = Depends(get_db),
+):
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from models.wallet import Wallet
+    from models.transaction import Transaction
+    from services.wallet_service import generate_reference
+    from services.platform_ledger import ledger_debit, make_idem_key
+
+    policy = (await db.execute(select(InsurancePolicy).where(InsurancePolicy.id == policy_id))).scalar_one_or_none()
+    if not policy:
+        raise HTTPException(404, "Policy not found")
+    if policy.status != "active":
+        raise HTTPException(400, f"Policy already {policy.status}")
+
+    now          = datetime.now(timezone.utc)
+    premium_paid = policy.premium_paid or policy.premium or Decimal("0")
+    policy_start = policy.policy_start or policy.activated_at or now
+    policy_end   = policy.policy_end or policy.expires_at
+
+    if (now - policy_start).days <= 15:
+        refund = premium_paid
+    elif policy_end:
+        total_d  = max(1, (policy_end - policy_start).days)
+        remain_d = max(0, (policy_end - now).days)
+        refund   = (Decimal(str(remain_d)) / Decimal(str(total_d))) * premium_paid
+        refund   = refund.quantize(Decimal("0.01"))
+    else:
+        refund = Decimal("0")
+
+    policy.status       = "cancelled"
+    policy.cancelled_at = now
+    policy.refund_paid  = refund
+
+    if refund > 0:
+        wallet = (await db.execute(select(Wallet).where(Wallet.user_id == policy.user_id))).scalar_one_or_none()
+        if wallet:
+            wallet.balance += refund
+        ref = generate_reference()
+        db.add(Transaction(
+            reference_number=ref, type="bill", amount=refund,
+            fee=Decimal("0"), status="completed", recipient_id=policy.user_id,
+            purpose="Insurance", description=f"Admin cancel — pro-rata refund",
+            tx_metadata={"policy_id": str(policy_id), "admin_id": str(admin.id)},
+            completed_at=now,
+        ))
+        await ledger_debit(db, "insurance_pool", refund,
+                           make_idem_key("admin_ins_refund", str(admin.id), str(policy_id)),
+                           user_id=admin.id, reference=ref, note="Admin insurance cancel refund")
+
+    await log_admin_action(db, admin.id, "cancel_insurance",
+                           target_user_id=policy.user_id,
+                           metadata={"policy_id": str(policy_id), "refund": str(refund)})
+    await db.commit()
+    return {"status": "cancelled", "policy_id": str(policy_id), "refund_amount": str(refund),
+            "message": f"Policy cancelled. PKR {refund:,.2f} refunded to user."}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

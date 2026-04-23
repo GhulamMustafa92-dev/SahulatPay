@@ -1,5 +1,7 @@
 """Finance router — Investments, Insurance, High-Yield Deposits. PROMPT 09."""
 import bcrypt
+import random
+import string
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional
@@ -242,14 +244,18 @@ async def my_insurance(
     return {
         "policies": [
             {
-                "id":           str(p.id),
-                "policy_type":  p.policy_type,
-                "plan_name":    p.plan_name,
-                "premium":      str(p.premium),
-                "coverage":     str(p.coverage),
-                "status":       p.status,
-                "expires_at":   p.expires_at.isoformat() if p.expires_at else None,
-                "activated_at": p.activated_at.isoformat(),
+                "id":                  str(p.id),
+                "policy_type":         p.policy_type,
+                "plan_name":           p.plan_name,
+                "policy_number":       p.policy_number,
+                "premium":             str(p.premium),
+                "coverage":            str(p.coverage),
+                "status":              p.status,
+                "expires_at":          p.expires_at.isoformat() if p.expires_at else None,
+                "activated_at":        p.activated_at.isoformat(),
+                "auto_deduct_enabled": p.auto_deduct_enabled,
+                "auto_deduct_freq":    p.auto_deduct_freq,
+                "next_deduction_at":   p.next_deduction_at.isoformat() if p.next_deduction_at else None,
             }
             for p in policies
         ],
@@ -267,6 +273,7 @@ async def create_insurance(
     db: AsyncSession = Depends(get_db),
 ):
     await _verify_pin(current_user, body.pin)
+    pol_num = "POL-" + "".join(random.choices(string.digits, k=8))
     ref = generate_reference()
     wallet = await _deduct(
         db, current_user.id, body.premium, ref,
@@ -279,6 +286,7 @@ async def create_insurance(
         user_id=current_user.id,
         policy_type=body.policy_type,
         plan_name=body.plan_name,
+        policy_number=pol_num,
         premium=body.premium,
         premium_paid=body.premium,
         coverage=body.coverage,
@@ -291,14 +299,51 @@ async def create_insurance(
     await db.commit()
     await db.refresh(policy)
     return {
-        "id":          str(policy.id),
-        "policy_type": policy.policy_type,
-        "plan_name":   policy.plan_name,
-        "premium":     str(policy.premium),
-        "coverage":    str(policy.coverage),
-        "status":      policy.status,
-        "new_balance": str(wallet.balance),
-        "message":     f"Insurance policy '{body.plan_name}' activated.",
+        "id":                  str(policy.id),
+        "policy_type":         policy.policy_type,
+        "plan_name":           policy.plan_name,
+        "policy_number":       policy.policy_number,
+        "premium":             str(policy.premium),
+        "coverage":            str(policy.coverage),
+        "status":              policy.status,
+        "auto_deduct_enabled": policy.auto_deduct_enabled,
+        "auto_deduct_freq":    policy.auto_deduct_freq,
+        "new_balance":         str(wallet.balance),
+        "message":             f"Insurance policy '{body.plan_name}' activated. Policy No: {pol_num}",
+    }
+
+
+@router.patch("/insurance/{policy_id}/auto-deduct")
+async def update_insurance_auto_deduct(
+    policy_id: UUID,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from pydantic import BaseModel
+    policy = (await db.execute(select(InsurancePolicy).where(InsurancePolicy.id == policy_id))).scalar_one_or_none()
+    if not policy or policy.user_id != current_user.id:
+        raise HTTPException(404, "Policy not found")
+    if policy.status != "active":
+        raise HTTPException(400, "Policy is not active")
+    enabled = bool(body.get("enabled", False))
+    freq    = str(body.get("frequency", "monthly"))
+    policy.auto_deduct_enabled = enabled
+    policy.auto_deduct_freq    = freq
+    if enabled:
+        now = _utcnow()
+        delta = timedelta(days=30) if freq == "monthly" else timedelta(days=7)
+        policy.next_deduction_at = now + delta
+    else:
+        policy.next_deduction_at = None
+    await db.commit()
+    await db.refresh(policy)
+    return {
+        "id":                  str(policy.id),
+        "auto_deduct_enabled": policy.auto_deduct_enabled,
+        "auto_deduct_freq":    policy.auto_deduct_freq,
+        "next_deduction_at":   policy.next_deduction_at.isoformat() if policy.next_deduction_at else None,
+        "message":             f"Auto-deduction {'enabled' if enabled else 'disabled'} for policy {policy.policy_number}.",
     }
 
 
