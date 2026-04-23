@@ -5,6 +5,7 @@ from mock_servers.models import (
     MockWalletAccount, MockBankAccount, MockBill, MockChallan,
     MockInsurancePolicy, MockStock, MockMutualFund, MockInternationalTransfer,
 )
+from mock_servers.seeds import seed_all
 
 router = APIRouter()
 
@@ -107,5 +108,38 @@ def dashboard_all():
                 "bank_balance_total":   round(sum(b.balance for b in banks), 2),
             },
         }
+    finally:
+        db.close()
+
+
+@router.post("/reseed")
+def reseed_mock_db():
+    """
+    Wipe all mock SQLite tables and reseed with the latest data.
+    Useful after code updates to Railway without a fresh deployment.
+    """
+    db = SessionLocal()
+    try:
+        db.query(MockWalletAccount).delete()
+        db.query(MockBankAccount).delete()
+        db.query(MockBill).delete()
+        db.query(MockChallan).delete()
+        db.query(MockInsurancePolicy).delete()
+        db.query(MockStock).delete()
+        db.query(MockMutualFund).delete()
+        db.query(MockInternationalTransfer).delete()
+        db.commit()
+        seed_all(db)
+        wallets = db.query(MockWalletAccount).count()
+        banks   = db.query(MockBankAccount).count()
+        bills   = db.query(MockBill).count()
+        return {
+            "success": True,
+            "message": "Mock DB wiped and reseeded",
+            "counts":  {"wallets": wallets, "banks": banks, "bills": bills},
+        }
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "error": str(e)}
     finally:
         db.close()
