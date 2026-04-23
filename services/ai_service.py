@@ -72,7 +72,7 @@ async def build_transaction_summary(user_id: UUID, db: AsyncSession) -> dict[str
         select(Wallet).where(Wallet.user_id == user_id)
     )
     wallet_obj = wallet_result.scalar_one_or_none()
-    current_balance = float(wallet_obj.balance) if wallet_obj else 0.0
+    current_balance = float(wallet_obj.balance or 0) if wallet_obj else 0.0
 
     total_income   = Decimal("0")
     total_spending = Decimal("0")

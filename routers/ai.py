@@ -99,7 +99,16 @@ async def chat(
     """Send a message to the AI assistant. Detects payment intent automatically."""
     session  = await _get_or_create_chat(db, current_user.id)
     history  = session.messages or []
-    summary  = await build_transaction_summary(current_user.id, db)
+
+    try:
+        summary = await build_transaction_summary(current_user.id, db)
+    except Exception:
+        summary = {
+            "balance": 0, "total_income": 0, "total_spending": 0,
+            "transaction_count": 0, "top_categories": [],
+            "monthly_comparison": {"this_month": 0, "last_month": 0, "change_pct": 0},
+            "period_days": 90,
+        }
 
     user_msg = {
         "role":      "user",
@@ -110,7 +119,15 @@ async def chat(
         "timestamp": _utcnow().isoformat(),
     }
 
-    ai_reply = await generate_chat_response(body.message, history, summary)
+    try:
+        ai_reply = await generate_chat_response(body.message, history, summary)
+    except Exception:
+        ai_reply = {
+            "role": "assistant",
+            "content": f"Your wallet balance is PKR {summary.get('balance', 0):,.0f}. How can I help?",
+            "type": "message", "amount": None, "recipient": None,
+            "timestamp": _utcnow().isoformat(),
+        }
 
     new_messages = history + [user_msg, ai_reply]
 

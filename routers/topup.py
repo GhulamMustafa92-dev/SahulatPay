@@ -137,13 +137,13 @@ async def create_wallet_topup_request(
             req_wallet.balance = Decimal(str(req_wallet.balance)) + Decimal(str(body.amount))
             ref = generate_reference()
             db.add(Transaction(
-                sender_id    = current_user.id,
-                recipient_id = current_user.id,
-                amount       = Decimal(str(body.amount)),
-                type         = "topup",
-                status       = "completed",
-                description  = f"{WALLET_LABELS[body.wallet_type]} top-up from {mock.name}",
-                reference    = ref,
+                sender_id        = current_user.id,
+                recipient_id     = current_user.id,
+                amount           = Decimal(str(body.amount)),
+                type             = "topup",
+                status           = "completed",
+                description      = f"{WALLET_LABELS[body.wallet_type]} top-up from {mock.name}",
+                reference_number = ref,
             ))
             await db.commit()
             return {
