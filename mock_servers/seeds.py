@@ -28,7 +28,7 @@ def seed_wallet_accounts(db):
     if db.query(MockWalletAccount).count() > 0:
         return
     accounts = [
-        # JazzCash
+        # JazzCash (12 accounts)
         ("jazzcash",  "+923001234567", "Ali Hassan",            8500),
         ("jazzcash",  "+923009876543", "Sara Khan",             12000),
         ("jazzcash",  "+923001112233", "Muhammad Asif",         3200),
@@ -37,7 +37,11 @@ def seed_wallet_accounts(db):
         ("jazzcash",  "+923003344556", "Iqra Aziz",             6400),
         ("jazzcash",  "+923006677889", "Babar Azam",            19500),
         ("jazzcash",  "+923002233445", "Nimra Khan",            4700),
-        # EasyPaisa
+        ("jazzcash",  "+923005511223", "Asim Azhar",            14200),
+        ("jazzcash",  "+923008833445", "Minal Khan",            7300),
+        ("jazzcash",  "+923001998877", "Ali Zafar",             31000),
+        ("jazzcash",  "+923004321987", "Hania Aamir",           5600),
+        # EasyPaisa (12 accounts)
         ("easypaisa", "+923101234567", "Usman Iqbal",           7800),
         ("easypaisa", "+923109876543", "Ayesha Raza",           15500),
         ("easypaisa", "+923101112233", "Bilal Ahmed",           4100),
@@ -46,27 +50,43 @@ def seed_wallet_accounts(db):
         ("easypaisa", "+923105566778", "Hira Baig",             6300),
         ("easypaisa", "+923102233445", "Zohaib Hassan",         22000),
         ("easypaisa", "+923106677889", "Sadaf Kanwal",          3900),
-        # SadaPay
+        ("easypaisa", "+923103344556", "Humayun Saeed",         18700),
+        ("easypaisa", "+923107788990", "Yumna Zaidi",           8400),
+        ("easypaisa", "+923101998877", "Waseem Akram",          41000),
+        ("easypaisa", "+923104321987", "Mehreen Raheel",        5200),
+        # SadaPay (10 accounts)
         ("sadapay",   "+923201234567", "Hamza Tariq",           31000),
         ("sadapay",   "+923209876543", "Zainab Ali",            5500),
         ("sadapay",   "+923201112233", "Omer Farooq",           18000),
         ("sadapay",   "+923205566778", "Arslan Naseer",         14000),
         ("sadapay",   "+923208899001", "Maryam Nawaz",          27500),
         ("sadapay",   "+923202233445", "Fawad Khan",            8900),
-        # NayaPay
+        ("sadapay",   "+923203344556", "Aiza Baig",             12600),
+        ("sadapay",   "+923207788990", "Hassan Ali",            6100),
+        ("sadapay",   "+923201998877", "Sadia Islam",           23000),
+        ("sadapay",   "+923204321987", "Azfar Rehman",          9800),
+        # NayaPay (10 accounts)
         ("nayapay",   "+923301234567", "Rabia Noor",            22000),
         ("nayapay",   "+923309876543", "Kamran Sheikh",         11000),
         ("nayapay",   "+923301112233", "Sana Butt",             6700),
         ("nayapay",   "+923305566778", "Danish Taimoor",        16500),
         ("nayapay",   "+923308899001", "Aiman Zaman",           9300),
         ("nayapay",   "+923302233445", "Junaid Khan",           4200),
-        # UPaisa
+        ("nayapay",   "+923303344556", "Urwa Hocane",           18900),
+        ("nayapay",   "+923307788990", "Fahad Mustafa",         35000),
+        ("nayapay",   "+923301998877", "Mehwish Hayat",         7800),
+        ("nayapay",   "+923304321987", "Ahad Raza Mir",         11500),
+        # UPaisa (10 accounts)
         ("upaisa",    "+923321234567", "Waqas Hussain",         4500),
         ("upaisa",    "+923329876543", "Hina Javed",            13500),
         ("upaisa",    "+923321112233", "Tariq Mehmood",         28000),
         ("upaisa",    "+923325566778", "Shehzad Roy",           7600),
-        ("upaisa",    "+923328899001", "Mehwish Hayat",         19000),
-        ("upaisa",    "+923322233445", "Adnan Siddiqui",        5100),
+        ("upaisa",    "+923328899001", "Adnan Siddiqui",        19000),
+        ("upaisa",    "+923322233445", "Saba Qamar",            5100),
+        ("upaisa",    "+923323344556", "Noman Ijaz",            14300),
+        ("upaisa",    "+923327788990", "Ushna Shah",            8900),
+        ("upaisa",    "+923321998877", "Zahid Ahmed",           22500),
+        ("upaisa",    "+923324321987", "Sana Javed",            6700),
     ]
     for provider, phone, name, balance in accounts:
         db.add(MockWalletAccount(provider=provider, phone=phone, name=name, balance=balance))
