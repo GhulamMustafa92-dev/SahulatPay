@@ -30,6 +30,32 @@ from services.wallet_service import generate_reference
 
 router = APIRouter()
 
+
+def _normalize_phone(phone: str) -> str:
+    """Normalize Pakistani phone to +92XXXXXXXXXX format."""
+    p = phone.strip().replace(" ", "").replace("-", "")
+    if p.startswith("+92"):
+        return p
+    if p.startswith("92") and len(p) >= 12:
+        return "+" + p
+    if p.startswith("0") and len(p) == 11:
+        return "+92" + p[1:]
+    return p
+
+
+def _lookup_mock_wallet(phone: str):
+    """Check mock SQLite wallet accounts (for demo). Returns account or None."""
+    try:
+        from mock_servers.db import SessionLocal
+        from mock_servers.models import MockWalletAccount
+        db = SessionLocal()
+        try:
+            return db.query(MockWalletAccount).filter_by(phone=phone, is_active=True).first()
+        finally:
+            db.close()
+    except Exception:
+        return None
+
 WALLET_LABELS: dict[str, str] = {
     "sadapay":   "SadaPay",
     "nayapay":   "NayaPay",
@@ -51,19 +77,28 @@ async def lookup_user(
     db: AsyncSession = Depends(get_db),
 ):
     """Find a registered SahulatPay user by phone for top-up."""
+    phone = _normalize_phone(phone)
     user = (await db.execute(
         select(User).where(User.phone_number == phone)
     )).scalar_one_or_none()
-    if not user:
-        raise HTTPException(404, "No SahulatPay account linked to this number")
-    if user.id == current_user.id:
-        raise HTTPException(400, "You cannot request a top-up from yourself")
-    return {
-        "user_id":    str(user.id),
-        "name":       user.full_name,
-        "phone":      user.phone_number,
-        "wallet":     wallet or "sahulatpay",
-    }
+    if user:
+        if user.id == current_user.id:
+            raise HTTPException(400, "You cannot request a top-up from yourself")
+        return {
+            "user_id": str(user.id),
+            "name":    user.full_name,
+            "phone":   user.phone_number,
+            "wallet":  wallet or "sahulatpay",
+        }
+    mock = _lookup_mock_wallet(phone)
+    if mock:
+        return {
+            "user_id": f"MOCK_{mock.id}",
+            "name":    mock.name,
+            "phone":   phone,
+            "wallet":  wallet or mock.provider,
+        }
+    raise HTTPException(404, "No account found for this number")
 
 
 # ── POST /topup/wallet-request ────────────────────────────────────────────────
@@ -86,11 +121,38 @@ async def create_wallet_topup_request(
     if body.wallet_type not in WALLET_LABELS:
         raise HTTPException(400, f"Unsupported wallet type: {body.wallet_type}")
 
+    phone = _normalize_phone(body.recipient_phone)
     recipient = (await db.execute(
-        select(User).where(User.phone_number == body.recipient_phone)
+        select(User).where(User.phone_number == phone)
     )).scalar_one_or_none()
+
     if not recipient:
-        raise HTTPException(404, "Recipient not found on SahulatPay")
+        mock = _lookup_mock_wallet(phone)
+        if mock:
+            req_wallet = (await db.execute(
+                select(Wallet).where(Wallet.user_id == current_user.id)
+            )).scalar_one_or_none()
+            if not req_wallet:
+                raise HTTPException(500, "Your wallet not found")
+            req_wallet.balance = Decimal(str(req_wallet.balance)) + Decimal(str(body.amount))
+            ref = generate_reference()
+            db.add(Transaction(
+                sender_id    = current_user.id,
+                recipient_id = current_user.id,
+                amount       = Decimal(str(body.amount)),
+                type         = "topup",
+                status       = "completed",
+                description  = f"{WALLET_LABELS[body.wallet_type]} top-up from {mock.name}",
+                reference    = ref,
+            ))
+            await db.commit()
+            return {
+                "request_id": ref,
+                "status":     "completed",
+                "expires_in": "0 minutes",
+                "message":    f"PKR {body.amount:,.0f} credited to your wallet from {mock.name} ({WALLET_LABELS[body.wallet_type]}).",
+            }
+        raise HTTPException(404, "Recipient not found. They must be a SahulatPay user or in the mock wallet database.")
     if recipient.id == current_user.id:
         raise HTTPException(400, "Cannot request a top-up from yourself")
 
