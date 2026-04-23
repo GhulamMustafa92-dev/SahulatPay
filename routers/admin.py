@@ -953,6 +953,76 @@ async def broadcast_notification(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# INVESTMENTS
+# ══════════════════════════════════════════════════════════════════════════════
+@router.get("/investments")
+async def list_all_investments(
+    page: int = 1, per_page: int = 25,
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    admin: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    from datetime import date as dt_date
+
+    q = (
+        select(Investment, User.full_name, User.phone_number)
+        .join(User, User.id == Investment.user_id)
+    )
+    if status:
+        q = q.where(Investment.status == status)
+    if search:
+        like = f"%{search}%"
+        q = q.where((User.full_name.ilike(like)) | (User.phone_number.ilike(like)))
+
+    total = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
+    rows  = (await db.execute(q.order_by(Investment.created_at.desc()).offset((page - 1) * per_page).limit(per_page))).all()
+
+    total_invested = (await db.execute(
+        select(func.coalesce(func.sum(Investment.amount), 0)).where(Investment.status == "active")
+    )).scalar() or 0
+    active_plans = (await db.execute(
+        select(func.count()).where(Investment.status == "active")
+    )).scalar() or 0
+    total_returns = (await db.execute(
+        select(func.coalesce(func.sum(Investment.expected_return), 0)).where(Investment.status == "active")
+    )).scalar() or 0
+
+    today = dt_date.today()
+    first_day = today.replace(day=1)
+    matured_this_month = (await db.execute(
+        select(func.count()).where(
+            Investment.maturity_date >= first_day,
+            Investment.maturity_date <= today,
+        )
+    )).scalar() or 0
+
+    return {
+        "investments": [
+            {
+                "id":             str(inv.id),
+                "user_id":        str(inv.user_id),
+                "user_name":      full_name or "—",
+                "user_phone":     phone or "—",
+                "plan_name":      inv.plan_name,
+                "amount":         float(inv.amount),
+                "returns":        float(inv.expected_return or 0),
+                "roi_percentage": float(inv.return_rate or 0),
+                "status":         inv.status,
+                "start_date":     inv.created_at.isoformat(),
+                "maturity_date":  str(inv.maturity_date) if inv.maturity_date else None,
+            }
+            for inv, full_name, phone in rows
+        ],
+        "total":              total,
+        "total_invested":     float(total_invested),
+        "active_plans":       active_plans,
+        "matured_this_month": matured_this_month,
+        "total_returns":      float(total_returns),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # INSURANCE
 # ══════════════════════════════════════════════════════════════════════════════
 @router.get("/insurance")
