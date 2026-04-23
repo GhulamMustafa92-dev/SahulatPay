@@ -30,6 +30,22 @@ def _mask_name(name: str) -> str:
     return parts[0] + " " + parts[1][0] + "****"
 
 
+def _normalize_phone(phone: str) -> str:
+    """Normalize Pakistani phone to +92XXXXXXXXXX format.
+    Accepts: 03001234567  →  +923001234567
+             923001234567 →  +923001234567
+             +923001234567 → +923001234567 (unchanged)
+    """
+    p = phone.strip().replace(" ", "").replace("-", "")
+    if p.startswith("+92"):
+        return p
+    if p.startswith("92") and len(p) >= 12:
+        return "+" + p
+    if p.startswith("0") and len(p) == 11:
+        return "+92" + p[1:]
+    return p  # return as-is if unrecognised
+
+
 class WalletLookupRequest(BaseModel):
     provider: str
     phone: str
@@ -47,6 +63,7 @@ class WalletSendRequest(BaseModel):
 def lookup_wallet(provider: str, phone: str, db: Session = Depends(get_db)):
     if provider not in PROVIDERS:
         raise HTTPException(400, f"Unknown provider: {provider}. Valid: {list(PROVIDERS)}")
+    phone = _normalize_phone(phone)
     account = db.query(MockWalletAccount).filter_by(provider=provider, phone=phone).first()
     if not account or not account.is_active:
         return {"found": False, "provider": PROVIDERS[provider], "phone": phone}
@@ -65,6 +82,7 @@ def lookup_wallet(provider: str, phone: str, db: Session = Depends(get_db)):
 def send_to_wallet(body: WalletSendRequest, db: Session = Depends(get_db)):
     if body.provider not in PROVIDERS:
         raise HTTPException(400, f"Unknown provider: {body.provider}")
+    body.phone = _normalize_phone(body.phone)
     account = db.query(MockWalletAccount).filter_by(provider=body.provider, phone=body.phone).first()
     if not account:
         account = MockWalletAccount(
@@ -99,6 +117,7 @@ def list_providers():
 # ── GET /mock/wallets/balance ─────────────────────────────────────────────────
 @router.get("/balance")
 def get_wallet_balance(provider: str, phone: str, db: Session = Depends(get_db)):
+    phone = _normalize_phone(phone)
     account = db.query(MockWalletAccount).filter_by(provider=provider, phone=phone).first()
     if not account:
         raise HTTPException(404, "Account not found in mock database")
