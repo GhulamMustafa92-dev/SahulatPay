@@ -22,6 +22,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fastapi import HTTPException
 from models.platform import PlatformAccount, PlatformLedgerEntry
 
 
@@ -34,7 +35,15 @@ async def _get_account(db: AsyncSession, account_type: str) -> PlatformAccount:
         .with_for_update()
     )).scalar_one_or_none()
     if not acct:
-        raise RuntimeError(f"Platform account '{account_type}' not found. Run migrations.")
+        try:
+            acct = PlatformAccount(type=account_type, balance=Decimal("0.00"))
+            db.add(acct)
+            await db.flush()
+        except Exception:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Platform account '{account_type}' not configured. Run: alembic upgrade head",
+            )
     return acct
 
 
