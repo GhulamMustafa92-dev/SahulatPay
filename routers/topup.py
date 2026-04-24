@@ -116,19 +116,52 @@ def _normalize_phone(phone: str) -> str:
     return p
 
 
-def _lookup_mock_wallet(phone: str):
-    """Check mock SQLite wallet accounts (for demo). Returns account or None."""
+def _lookup_mock_wallet(phone: str, provider: str = None):
+    """Check mock SQLite wallet accounts (for demo).
+
+    1. Try exact provider+phone match.
+    2. Fall back to phone-only match (any provider).
+    3. If still nothing found AND provider is an external wallet (not sahulatpay),
+       return a lightweight synthetic object so any valid Pakistani number works.
+    """
     try:
         from mock_servers.db import SessionLocal
         from mock_servers.models import MockWalletAccount
 
         db = SessionLocal()
         try:
-            return (
-                db.query(MockWalletAccount)
-                .filter_by(phone=phone, is_active=True)
-                .first()
+            q = db.query(MockWalletAccount).filter(
+                MockWalletAccount.phone == phone,
+                MockWalletAccount.is_active == True,  # noqa: E712
             )
+
+            # Prefer provider-specific match
+            if provider and provider != "sahulatpay":
+                account = q.filter(MockWalletAccount.provider == provider).first()
+                if account:
+                    return account
+                # Fall back to any provider for this phone
+                account = q.first()
+                if account:
+                    return account
+                # Still not found — synthesise a mock entry (no DB write needed)
+                provider_label = WALLET_LABELS.get(provider, provider.capitalize())
+
+                class _SyntheticAccount:
+                    """Minimal duck-type of MockWalletAccount for lookup responses."""
+
+                    id = 0
+                    name = f"{provider_label} Account (••{phone[-4:]})"
+                    balance = 10_000.0
+                    is_active = True
+
+                    def __init__(self, prov: str, ph: str):
+                        self.provider = prov
+                        self.phone = ph
+
+                return _SyntheticAccount(provider, phone)
+            else:
+                return q.first()
         finally:
             db.close()
     except Exception:
@@ -169,13 +202,14 @@ async def lookup_user(
             "phone": user.phone_number,
             "wallet": wallet or "sahulatpay",
         }
-    mock = _lookup_mock_wallet(phone)
+    # Pass provider so synthetic fallback is used for any Pakistani number
+    mock = _lookup_mock_wallet(phone, provider=wallet)
     if mock:
         return {
             "user_id": f"MOCK_{mock.id}",
             "name": mock.name,
             "phone": phone,
-            "wallet": wallet or mock.provider,
+            "wallet": wallet or getattr(mock, "provider", "external"),
         }
     raise HTTPException(404, "No account found for this number")
 
@@ -206,7 +240,7 @@ async def create_wallet_topup_request(
     ).scalar_one_or_none()
 
     if not recipient:
-        mock = _lookup_mock_wallet(phone)
+        mock = _lookup_mock_wallet(phone, provider=body.wallet_type)
         if mock:
             # Create a pending request (same 15-min flow as real SahulatPay user).
             # A background task will auto-approve it after a realistic delay,
