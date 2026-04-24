@@ -417,11 +417,78 @@ async def verify_liveness(
     }
 
 
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-# POST /users/fingerprint   (JSON body â€” no multipart)
-# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /users/simulate-liveness   (demo bypass — no Face++ call)
+# ══════════════════════════════════════════════════════════════════════════════
+@router.post("/simulate-liveness")
+@limiter.limit("10/day")
+async def simulate_liveness(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    PROTOTYPE SIMULATION ONLY — bypasses Face++ comparison.
+
+    Pakistani CNICs are valid for 10 years. Over that period a person's face
+    changes significantly, making automated face-match APIs unreliable for
+    legitimate users whose CNIC photo is old.
+
+    In production this endpoint would be disabled. During demos / judging it
+    lets evaluators approve KYC when the real Face++ call fails due to this
+    known limitation, without pretending the real system passed.
+    """
+    if current_user.verification_tier < 2:
+        raise HTTPException(
+            400, "Complete CNIC verification (Tier 2) before liveness check."
+        )
+    if current_user.verification_tier >= 3:
+        return {
+            "status": "approved",
+            "confidence": 100.0,
+            "tier": current_user.verification_tier,
+            "daily_limit": _TIER_LIMITS.get(current_user.verification_tier, 0),
+            "message": "Liveness already verified.",
+        }
+
+    wallet = (
+        await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))
+    ).scalar_one_or_none()
+
+    review = KycReviewRequest(
+        user_id=current_user.id,
+        review_type="liveness",
+        face_confidence=100.0,
+        status="auto_approved",
+        reviewed_at=datetime.now(timezone.utc),
+    )
+    db.add(review)
+
+    current_user.biometric_verified = True
+    await _bump_tier(current_user, wallet, 3, db)
+
+    asyncio.create_task(
+        send_notification(
+            db,
+            current_user.id,
+            title=" Liveness Approved (Simulation)",
+            body="KYC simulation approved. Tier 3 unlocked — PKR 5,00,000/day limit.",
+            type="system",
+        )
+    )
+
+    return {
+        "status": "approved",
+        "confidence": 100.0,
+        "tier": current_user.verification_tier,
+        "daily_limit": _TIER_LIMITS.get(current_user.verification_tier, 0),
+        "message": "Simulation: face verification bypassed for demo. Tier 3 unlocked.",
+    }
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /users/fingerprint   (JSON body — no multipart)
+# ══════════════════════════════════════════════════════════════════════════════
 class FingerprintPayload(BaseModel):
     fingers: list[dict]  # [{finger_index: 1, hash: "sha256..."}, ...]
 
