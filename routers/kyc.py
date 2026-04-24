@@ -487,12 +487,77 @@ async def simulate_liveness(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# POST /users/simulate-cnic   (demo bypass — no OCR / DeepSeek call)
+# ══════════════════════════════════════════════════════════════════════════════
+@router.post("/simulate-cnic")
+@limiter.limit("10/day")
+async def simulate_cnic(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    PROTOTYPE SIMULATION ONLY — bypasses OCR and DeepSeek CNIC extraction.
+
+    Free-tier OCR and DeepSeek APIs sometimes fail to extract data from
+    low-quality, glare-affected, or non-standard CNIC images. In production
+    a paid, high-accuracy OCR pipeline with multiple fallbacks would be used.
+
+    This endpoint auto-approves CNIC verification (Tier 2) for demo purposes
+    without uploading or processing any document image.
+    """
+    if current_user.verification_tier >= 2:
+        return {
+            "status": "already_verified",
+            "tier": current_user.verification_tier,
+            "daily_limit": _TIER_LIMITS.get(current_user.verification_tier, 0),
+            "cnic_masked": current_user.cnic_number_masked,
+            "extracted": None,
+            "message": "CNIC already verified. Tier 2+ active.",
+        }
+
+    wallet = (
+        await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))
+    ).scalar_one_or_none()
+
+    review = KycReviewRequest(
+        user_id=current_user.id,
+        status="auto_approved",
+        reviewed_at=datetime.now(timezone.utc),
+    )
+    db.add(review)
+
+    current_user.cnic_verified = True
+    await _bump_tier(current_user, wallet, 2, db)
+
+    asyncio.create_task(
+        send_notification(
+            db,
+            current_user.id,
+            title=" CNIC Verified (Simulation)",
+            body="KYC simulation approved. Tier 2 unlocked — PKR 1,00,000/day limit.",
+            type="system",
+        )
+    )
+
+    return {
+        "status": "approved",
+        "tier": current_user.verification_tier,
+        "daily_limit": _TIER_LIMITS.get(current_user.verification_tier, 0),
+        "cnic_masked": None,
+        "extracted": None,
+        "message": "Simulation: CNIC verification bypassed for demo. Tier 2 unlocked.",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # POST /users/fingerprint   (JSON body — no multipart)
 # ══════════════════════════════════════════════════════════════════════════════
 class FingerprintPayload(BaseModel):
     fingers: list[dict]  # [{finger_index: 1, hash: "sha256..."}, ...]
 
 
+# ══════════════════════════════════════════════════════════════════════════════
 @router.post("/fingerprint")
 @limiter.limit("30/day")
 async def submit_fingerprint(
