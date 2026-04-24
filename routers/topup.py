@@ -5,30 +5,103 @@ Endpoints:
   GET  /api/v1/topup/pending                  — recipient sees pending requests
   POST /api/v1/topup/wallet-approve           — recipient approves/rejects with PIN
 """
+
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from passlib.hash import bcrypt as bc
-from pydantic import BaseModel
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
-
 from config import settings
-from database import get_db
+from database import AsyncSessionLocal, get_db
+from fastapi import APIRouter, Depends, HTTPException
 from models.topup import WalletTopUpRequest
 from models.transaction import Transaction
 from models.user import User
 from models.wallet import Wallet
+from passlib.hash import bcrypt as bc
+from pydantic import BaseModel
 from services.auth_service import get_current_user
 from services.notification_service import send_notification
 from services.wallet_service import generate_reference
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
+
+
+# ── Background task: auto-approve a mock-wallet top-up after a short delay ───
+async def _auto_approve_mock_topup(
+    request_id: str,
+    mock_name: str,
+    wallet_label: str,
+    requester_id: str,
+) -> None:
+    """Simulates the mock wallet confirming payment after ~8 seconds."""
+    await asyncio.sleep(8)
+    try:
+        async with AsyncSessionLocal() as db:
+            req = (
+                await db.execute(
+                    select(WalletTopUpRequest).where(
+                        WalletTopUpRequest.id == UUID(request_id),
+                        WalletTopUpRequest.status == "pending",
+                    )
+                )
+            ).scalar_one_or_none()
+            if not req:
+                return  # already approved / expired / cancelled
+
+            if datetime.now(timezone.utc) > req.expires_at:
+                req.status = "expired"
+                await db.commit()
+                return
+
+            wallet = (
+                await db.execute(
+                    select(Wallet).where(Wallet.user_id == req.requester_id)
+                )
+            ).scalar_one_or_none()
+            if not wallet:
+                return
+
+            wallet.balance += req.amount
+            ref = generate_reference()
+            db.add(
+                Transaction(
+                    sender_id=req.requester_id,
+                    recipient_id=req.requester_id,
+                    amount=req.amount,
+                    type="topup",
+                    status="completed",
+                    description=req.description
+                    or f"{wallet_label} top-up from {mock_name}",
+                    reference_number=ref,
+                )
+            )
+            req.status = "approved"
+            await db.commit()
+
+            await send_notification(
+                db=db,
+                user_id=req.requester_id,
+                title="✅ Top-Up Successful!",
+                body=(
+                    f"PKR {req.amount:,.0f} added to your wallet from "
+                    f"{mock_name}'s {wallet_label}"
+                ),
+                type="topup_result",
+                data={
+                    "topup_request_id": request_id,
+                    "status": "approved",
+                    "amount": str(req.amount),
+                    "reference": ref,
+                },
+            )
+    except Exception:
+        pass  # Background task — swallow all errors silently
 
 
 def _normalize_phone(phone: str) -> str:
@@ -48,20 +121,26 @@ def _lookup_mock_wallet(phone: str):
     try:
         from mock_servers.db import SessionLocal
         from mock_servers.models import MockWalletAccount
+
         db = SessionLocal()
         try:
-            return db.query(MockWalletAccount).filter_by(phone=phone, is_active=True).first()
+            return (
+                db.query(MockWalletAccount)
+                .filter_by(phone=phone, is_active=True)
+                .first()
+            )
         finally:
             db.close()
     except Exception:
         return None
 
+
 WALLET_LABELS: dict[str, str] = {
-    "sadapay":   "SadaPay",
-    "nayapay":   "NayaPay",
-    "upaisa":    "Upaisa",
+    "sadapay": "SadaPay",
+    "nayapay": "NayaPay",
+    "upaisa": "Upaisa",
     "easypaisa": "EasyPaisa",
-    "jazzcash":  "JazzCash",
+    "jazzcash": "JazzCash",
     "sahulatpay": "SahulatPay",
 }
 
@@ -78,25 +157,25 @@ async def lookup_user(
 ):
     """Find a registered SahulatPay user by phone for top-up."""
     phone = _normalize_phone(phone)
-    user = (await db.execute(
-        select(User).where(User.phone_number == phone)
-    )).scalar_one_or_none()
+    user = (
+        await db.execute(select(User).where(User.phone_number == phone))
+    ).scalar_one_or_none()
     if user:
         if user.id == current_user.id:
             raise HTTPException(400, "You cannot request a top-up from yourself")
         return {
             "user_id": str(user.id),
-            "name":    user.full_name,
-            "phone":   user.phone_number,
-            "wallet":  wallet or "sahulatpay",
+            "name": user.full_name,
+            "phone": user.phone_number,
+            "wallet": wallet or "sahulatpay",
         }
     mock = _lookup_mock_wallet(phone)
     if mock:
         return {
             "user_id": f"MOCK_{mock.id}",
-            "name":    mock.name,
-            "phone":   phone,
-            "wallet":  wallet or mock.provider,
+            "name": mock.name,
+            "phone": phone,
+            "wallet": wallet or mock.provider,
         }
     raise HTTPException(404, "No account found for this number")
 
@@ -104,9 +183,9 @@ async def lookup_user(
 # ── POST /topup/wallet-request ────────────────────────────────────────────────
 class WalletTopUpRequestBody(BaseModel):
     recipient_phone: str
-    wallet_type:     str
-    amount:          float
-    description:     Optional[str] = None
+    wallet_type: str
+    amount: float
+    description: Optional[str] = None
 
 
 @router.post("/wallet-request")
@@ -122,77 +201,91 @@ async def create_wallet_topup_request(
         raise HTTPException(400, f"Unsupported wallet type: {body.wallet_type}")
 
     phone = _normalize_phone(body.recipient_phone)
-    recipient = (await db.execute(
-        select(User).where(User.phone_number == phone)
-    )).scalar_one_or_none()
+    recipient = (
+        await db.execute(select(User).where(User.phone_number == phone))
+    ).scalar_one_or_none()
 
     if not recipient:
         mock = _lookup_mock_wallet(phone)
         if mock:
-            req_wallet = (await db.execute(
-                select(Wallet).where(Wallet.user_id == current_user.id)
-            )).scalar_one_or_none()
-            if not req_wallet:
-                raise HTTPException(500, "Your wallet not found")
-            req_wallet.balance = Decimal(str(req_wallet.balance)) + Decimal(str(body.amount))
-            ref = generate_reference()
-            db.add(Transaction(
-                sender_id        = current_user.id,
-                recipient_id     = current_user.id,
-                amount           = Decimal(str(body.amount)),
-                type             = "topup",
-                status           = "completed",
-                description      = f"{WALLET_LABELS[body.wallet_type]} top-up from {mock.name}",
-                reference_number = ref,
-            ))
+            # Create a pending request (same 15-min flow as real SahulatPay user).
+            # A background task will auto-approve it after a realistic delay,
+            # simulating the mock wallet confirming the payment.
+            req = WalletTopUpRequest(
+                requester_id=current_user.id,
+                recipient_id=current_user.id,  # self-referential for mock wallet
+                wallet_type=body.wallet_type,
+                amount=Decimal(str(body.amount)),
+                description=body.description
+                or f"{WALLET_LABELS[body.wallet_type]} top-up from {mock.name}",
+                status="pending",
+                expires_at=datetime.now(timezone.utc)
+                + timedelta(minutes=REQUEST_TTL_MINUTES),
+            )
+            db.add(req)
             await db.commit()
+            await db.refresh(req)
+
+            # Schedule auto-approval — mock wallet confirms after ~8 seconds
+            asyncio.create_task(
+                _auto_approve_mock_topup(
+                    request_id=str(req.id),
+                    mock_name=mock.name,
+                    wallet_label=WALLET_LABELS[body.wallet_type],
+                    requester_id=str(current_user.id),
+                )
+            )
+
             return {
-                "request_id": ref,
-                "status":     "completed",
-                "expires_in": "0 minutes",
-                "message":    f"PKR {body.amount:,.0f} credited to your wallet from {mock.name} ({WALLET_LABELS[body.wallet_type]}).",
+                "request_id": str(req.id),
+                "status": "pending",
+                "expires_in": f"{REQUEST_TTL_MINUTES} minutes",
+                "message": f"Request sent to {mock.name}'s {WALLET_LABELS[body.wallet_type]}. Waiting for approval.",
             }
-        raise HTTPException(404, "Recipient not found. They must be a SahulatPay user or in the mock wallet database.")
+        raise HTTPException(
+            404,
+            "Recipient not found. They must be a SahulatPay user or in the mock wallet database.",
+        )
     if recipient.id == current_user.id:
         raise HTTPException(400, "Cannot request a top-up from yourself")
 
     wallet_label = WALLET_LABELS[body.wallet_type]
     req = WalletTopUpRequest(
-        requester_id = current_user.id,
-        recipient_id = recipient.id,
-        wallet_type  = body.wallet_type,
-        amount       = Decimal(str(body.amount)),
-        description  = body.description,
-        status       = "pending",
-        expires_at   = datetime.now(timezone.utc) + timedelta(minutes=REQUEST_TTL_MINUTES),
+        requester_id=current_user.id,
+        recipient_id=recipient.id,
+        wallet_type=body.wallet_type,
+        amount=Decimal(str(body.amount)),
+        description=body.description,
+        status="pending",
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=REQUEST_TTL_MINUTES),
     )
     db.add(req)
     await db.commit()
     await db.refresh(req)
 
     await send_notification(
-        db       = db,
-        user_id  = recipient.id,
-        title    = "💰 Top-Up Request",
-        body     = (
+        db=db,
+        user_id=recipient.id,
+        title="💰 Top-Up Request",
+        body=(
             f"{current_user.full_name} wants to top-up PKR {body.amount:,.0f} "
             f"from your {wallet_label} account"
         ),
-        type     = "topup_request",
-        data     = {
+        type="topup_request",
+        data={
             "topup_request_id": str(req.id),
-            "requester_name":   current_user.full_name,
-            "amount":           str(body.amount),
-            "wallet_type":      body.wallet_type,
-            "deep_link":        f"topup/approve/{req.id}",
+            "requester_name": current_user.full_name,
+            "amount": str(body.amount),
+            "wallet_type": body.wallet_type,
+            "deep_link": f"topup/approve/{req.id}",
         },
     )
 
     return {
         "request_id": str(req.id),
-        "status":     "pending",
+        "status": "pending",
         "expires_in": f"{REQUEST_TTL_MINUTES} minutes",
-        "message":    f"Request sent to {recipient.full_name}. Waiting for approval.",
+        "message": f"Request sent to {recipient.full_name}. Waiting for approval.",
     }
 
 
@@ -204,38 +297,48 @@ async def get_pending_requests(
 ):
     """Recipient sees all pending top-up requests (not yet expired)."""
     now = datetime.now(timezone.utc)
-    rows = (await db.execute(
-        select(WalletTopUpRequest).where(
-            WalletTopUpRequest.recipient_id == current_user.id,
-            WalletTopUpRequest.status == "pending",
-            WalletTopUpRequest.expires_at > now,
-        ).order_by(WalletTopUpRequest.created_at.desc())
-    )).scalars().all()
+    rows = (
+        (
+            await db.execute(
+                select(WalletTopUpRequest)
+                .where(
+                    WalletTopUpRequest.recipient_id == current_user.id,
+                    WalletTopUpRequest.status == "pending",
+                    WalletTopUpRequest.expires_at > now,
+                )
+                .order_by(WalletTopUpRequest.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
 
     items = []
     for r in rows:
-        req_user = (await db.execute(
-            select(User).where(User.id == r.requester_id)
-        )).scalar_one_or_none()
-        items.append({
-            "id":               str(r.id),
-            "requester_name":   req_user.full_name if req_user else "Unknown",
-            "requester_phone":  req_user.phone_number if req_user else "",
-            "wallet_type":      r.wallet_type,
-            "wallet_label":     WALLET_LABELS.get(r.wallet_type, r.wallet_type),
-            "amount":           str(r.amount),
-            "description":      r.description,
-            "expires_at":       r.expires_at.isoformat(),
-            "created_at":       r.created_at.isoformat(),
-        })
+        req_user = (
+            await db.execute(select(User).where(User.id == r.requester_id))
+        ).scalar_one_or_none()
+        items.append(
+            {
+                "id": str(r.id),
+                "requester_name": req_user.full_name if req_user else "Unknown",
+                "requester_phone": req_user.phone_number if req_user else "",
+                "wallet_type": r.wallet_type,
+                "wallet_label": WALLET_LABELS.get(r.wallet_type, r.wallet_type),
+                "amount": str(r.amount),
+                "description": r.description,
+                "expires_at": r.expires_at.isoformat(),
+                "created_at": r.created_at.isoformat(),
+            }
+        )
     return {"requests": items, "count": len(items)}
 
 
 # ── POST /topup/wallet-approve ────────────────────────────────────────────────
 class ApproveTopUpBody(BaseModel):
     request_id: str
-    pin:        str
-    action:     str = "approve"   # approve | reject
+    pin: str
+    action: str = "approve"  # approve | reject
 
 
 @router.post("/wallet-approve")
@@ -248,12 +351,14 @@ async def approve_wallet_topup(
     if body.action not in ("approve", "reject"):
         raise HTTPException(400, "action must be 'approve' or 'reject'")
 
-    req = (await db.execute(
-        select(WalletTopUpRequest).where(
-            WalletTopUpRequest.id == UUID(body.request_id),
-            WalletTopUpRequest.recipient_id == current_user.id,
+    req = (
+        await db.execute(
+            select(WalletTopUpRequest).where(
+                WalletTopUpRequest.id == UUID(body.request_id),
+                WalletTopUpRequest.recipient_id == current_user.id,
+            )
         )
-    )).scalar_one_or_none()
+    ).scalar_one_or_none()
     if not req:
         raise HTTPException(404, "Request not found")
     if req.status != "pending":
@@ -268,12 +373,12 @@ async def approve_wallet_topup(
         req.status = "rejected"
         await db.commit()
         await send_notification(
-            db      = db,
-            user_id = req.requester_id,
-            title   = "Top-Up Declined",
-            body    = f"Your top-up request of PKR {req.amount:,.0f} was declined.",
-            type    = "topup_result",
-            data    = {"topup_request_id": str(req.id), "status": "rejected"},
+            db=db,
+            user_id=req.requester_id,
+            title="Top-Up Declined",
+            body=f"Your top-up request of PKR {req.amount:,.0f} was declined.",
+            type="topup_result",
+            data={"topup_request_id": str(req.id), "status": "rejected"},
         )
         return {"success": True, "status": "rejected"}
 
@@ -283,42 +388,44 @@ async def approve_wallet_topup(
     if not bc.verify(body.pin, current_user.pin_hash):
         raise HTTPException(400, "Incorrect PIN")
 
-    recipient_wallet = (await db.execute(
-        select(Wallet).where(Wallet.user_id == current_user.id)
-    )).scalar_one_or_none()
+    recipient_wallet = (
+        await db.execute(select(Wallet).where(Wallet.user_id == current_user.id))
+    ).scalar_one_or_none()
     if not recipient_wallet:
         raise HTTPException(404, "Your wallet not found")
     if recipient_wallet.is_frozen:
         raise HTTPException(400, "Your wallet is frozen and cannot process transfers")
     if recipient_wallet.balance < req.amount:
-        raise HTTPException(400, f"Insufficient balance. Available: PKR {recipient_wallet.balance:,.2f}")
+        raise HTTPException(
+            400, f"Insufficient balance. Available: PKR {recipient_wallet.balance:,.2f}"
+        )
 
-    requester_wallet = (await db.execute(
-        select(Wallet).where(Wallet.user_id == req.requester_id)
-    )).scalar_one_or_none()
+    requester_wallet = (
+        await db.execute(select(Wallet).where(Wallet.user_id == req.requester_id))
+    ).scalar_one_or_none()
     if not requester_wallet:
         raise HTTPException(404, "Requester wallet not found")
 
     amount = req.amount
-    recipient_wallet.balance  -= amount
-    requester_wallet.balance  += amount
+    recipient_wallet.balance -= amount
+    requester_wallet.balance += amount
 
     ref = generate_reference()
     wallet_label = WALLET_LABELS.get(req.wallet_type, req.wallet_type)
     txn = Transaction(
-        reference_number = ref,
-        type             = "topup",
-        amount           = amount,
-        fee              = Decimal("0"),
-        status           = "completed",
-        sender_id        = current_user.id,
-        recipient_id     = req.requester_id,
-        purpose          = "TopUp",
-        description      = req.description or f"Wallet top-up via {wallet_label}",
-        tx_metadata      = {
-            "wallet_type":       req.wallet_type,
-            "topup_request_id":  str(req.id),
-            "method":            "wallet_pull",
+        reference_number=ref,
+        type="topup",
+        amount=amount,
+        fee=Decimal("0"),
+        status="completed",
+        sender_id=current_user.id,
+        recipient_id=req.requester_id,
+        purpose="TopUp",
+        description=req.description or f"Wallet top-up via {wallet_label}",
+        tx_metadata={
+            "wallet_type": req.wallet_type,
+            "topup_request_id": str(req.id),
+            "method": "wallet_pull",
         },
     )
     db.add(txn)
@@ -326,26 +433,26 @@ async def approve_wallet_topup(
     await db.commit()
 
     await send_notification(
-        db      = db,
-        user_id = req.requester_id,
-        title   = "✅ Top-Up Successful!",
-        body    = (
+        db=db,
+        user_id=req.requester_id,
+        title="✅ Top-Up Successful!",
+        body=(
             f"PKR {amount:,.0f} added to your wallet from "
             f"{current_user.full_name}'s {wallet_label}"
         ),
-        type    = "topup_result",
-        data    = {
+        type="topup_result",
+        data={
             "topup_request_id": str(req.id),
-            "status":           "approved",
-            "amount":           str(amount),
-            "reference":        ref,
+            "status": "approved",
+            "amount": str(amount),
+            "reference": ref,
         },
     )
 
     return {
-        "success":   True,
-        "status":    "approved",
-        "amount":    str(amount),
+        "success": True,
+        "status": "approved",
+        "amount": str(amount),
         "reference": ref,
-        "message":   f"PKR {amount:,.0f} transferred successfully",
+        "message": f"PKR {amount:,.0f} transferred successfully",
     }
