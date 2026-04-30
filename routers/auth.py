@@ -771,14 +771,11 @@ async def get_me(current_user: User = Depends(get_current_user)):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GET /auth/dev/otp  — DEV_MODE only: returns the last OTP sent to a phone
-# Android dev builds call this to auto-fill the OTP input field.
-# This endpoint returns 404 in production (DEV_MODE=False).
+# GET /auth/dev/otp  — returns the last OTP sent to a phone for auto-fill
+# Android builds call this to auto-fill the OTP input field.
 # ══════════════════════════════════════════════════════════════════════════════
 @router.get("/dev/otp", include_in_schema=False)
 async def dev_get_otp(phone: str):
-    if not settings.DEV_MODE:
-        raise HTTPException(status_code=404, detail="Not found")
     try:
         phone_normalized = normalize_phone(phone)
     except Exception:
