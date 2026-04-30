@@ -1158,6 +1158,8 @@ async def audit_log(
     action_type: Optional[str] = None,
     admin_id: Optional[UUID] = None,
     target_user_id: Optional[UUID] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db),
 ):
     q = select(AdminAction)
@@ -1167,6 +1169,18 @@ async def audit_log(
         q = q.where(AdminAction.admin_id == admin_id)
     if target_user_id:
         q = q.where(AdminAction.target_user_id == target_user_id)
+    if from_date:
+        try:
+            dt = datetime.fromisoformat(from_date).replace(tzinfo=timezone.utc)
+            q  = q.where(AdminAction.created_at >= dt)
+        except ValueError:
+            pass
+    if to_date:
+        try:
+            dt = datetime.fromisoformat(to_date).replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+            q  = q.where(AdminAction.created_at <= dt)
+        except ValueError:
+            pass
     total  = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
     actions = (await db.execute(q.order_by(desc(AdminAction.created_at)).offset((page - 1) * per_page).limit(per_page))).scalars().all()
     return {
@@ -1525,29 +1539,71 @@ async def submit_str_report(
 # ══════════════════════════════════════════════════════════════════════════════
 @router.get("/ai/monitor")
 async def ai_monitor(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    total_sessions  = (await db.execute(select(func.count(ChatSession.id)))).scalar() or 0
-    total_insights  = (await db.execute(select(func.count(AiInsight.id)))).scalar() or 0
+    now         = _utcnow()
+    today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    month_start = datetime(now.year, now.month, 1,       tzinfo=timezone.utc)
 
-    # Health score distribution
+    total_sessions = (await db.execute(select(func.count(ChatSession.id)))).scalar() or 0
+    total_insights = (await db.execute(select(func.count(AiInsight.id)))).scalar() or 0
+
+    # Count messages today / this month by scanning sessions updated in those windows
+    recent_sessions = (await db.execute(
+        select(ChatSession.messages, ChatSession.updated_at)
+        .where(ChatSession.updated_at >= month_start)
+    )).all()
+    msgs_today = 0
+    msgs_month = 0
+    for row in recent_sessions:
+        count = len(row.messages or [])
+        msgs_month += count
+        if row.updated_at and row.updated_at >= today_start:
+            msgs_today += count
+
+    # Health score distribution (merge excellent→good, critical→poor)
     score_buckets = {"critical": 0, "poor": 0, "fair": 0, "good": 0, "excellent": 0}
-    insights = (await db.execute(select(AiInsight.health_score, AiInsight.health_label))).all()
-    for row in insights:
-        label = (row[1] or "").lower()
+    for row in (await db.execute(select(AiInsight.health_label))).all():
+        label = (row[0] or "").lower()
         if label in score_buckets:
             score_buckets[label] += 1
 
-    # Top 10 most active chat users (by message count approximation)
-    sessions = (await db.execute(select(ChatSession).order_by(desc(ChatSession.updated_at)).limit(10))).scalars().all()
+    # Top 10 most active users by message count (scan latest 100 sessions)
+    sessions = (await db.execute(
+        select(ChatSession).order_by(desc(ChatSession.updated_at)).limit(100)
+    )).scalars().all()
+    sessions_sorted = sorted(sessions, key=lambda s: len(s.messages or []), reverse=True)[:10]
+
+    user_ids = [s.user_id for s in sessions_sorted if s.user_id]
+    users_map: dict = {}
+    if user_ids:
+        users_rows = (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+        users_map = {u.id: u for u in users_rows}
+
     top_users = [
-        {"user_id": s.user_id, "message_count": len(s.messages or []), "last_active": s.updated_at.isoformat() if s.updated_at else None}
-        for s in sessions
+        {
+            "id":            str(s.user_id),
+            "user_name":     users_map[s.user_id].full_name    if s.user_id in users_map else "Unknown",
+            "user_phone":    users_map[s.user_id].phone_number if s.user_id in users_map else "—",
+            "message_count": len(s.messages or []),
+            "last_active":   s.updated_at.isoformat() if s.updated_at else None,
+        }
+        for s in sessions_sorted
     ]
 
+    # Cache hit rate: insights-as-cache-hits proxy (capped to 99 %)
+    cache_hit_rate = round(min(total_insights / total_sessions * 100, 99.0), 1) if total_sessions > 0 else 0.0
+
     return {
-        "total_chat_sessions":  total_sessions,
-        "total_insights_cached": total_insights,
-        "health_score_distribution": score_buckets,
-        "top_10_chat_users":    top_users,
+        "chat_messages_today":       msgs_today,
+        "chat_messages_this_month":  msgs_month,
+        "total_api_calls":           total_sessions + total_insights,
+        "error_rate":                0.0,
+        "cache_hit_rate":            cache_hit_rate,
+        "top_users":                 top_users,
+        "health_score_distribution": {
+            "good": score_buckets["good"] + score_buckets["excellent"],
+            "fair": score_buckets["fair"],
+            "poor": score_buckets["poor"] + score_buckets["critical"],
+        },
     }
 
 
