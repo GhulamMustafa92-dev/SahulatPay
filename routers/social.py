@@ -83,8 +83,8 @@ async def create_split(
             total_custom += p.amount
         resolved.append((user, p.amount))
 
-    if body.split_type == "custom" and abs(total_custom - body.total_amount) > Decimal("0.01"):
-        raise HTTPException(400, f"Custom amounts sum ({total_custom}) must equal total_amount ({body.total_amount})")
+    if body.split_type == "custom" and total_custom > body.total_amount + Decimal("0.01"):
+        raise HTTPException(400, f"Custom amounts sum ({total_custom}) cannot exceed total_amount ({body.total_amount}). Creator keeps the remainder.")
 
     equal_share = body.total_amount / (len(resolved) + 1) if body.split_type == "equal" else None
 

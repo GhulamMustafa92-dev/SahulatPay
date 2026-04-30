@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, update, desc, and_, cast, Date
+from sqlalchemy import select, func, update, desc, and_, cast, Date, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -1301,14 +1301,75 @@ async def list_high_yield(
 # ══════════════════════════════════════════════════════════════════════════════
 @router.get("/zakat/stats")
 async def zakat_stats(admin: User = Depends(require_admin), db: AsyncSession = Depends(get_db)):
-    total_calcs   = (await db.execute(select(func.count(ZakatCalculation.id)))).scalar() or 0
-    paid_count    = (await db.execute(select(func.count(ZakatCalculation.id)).where(ZakatCalculation.is_paid == True))).scalar() or 0
-    total_paid    = (await db.execute(select(func.coalesce(func.sum(ZakatCalculation.zakat_due_pkr), 0)).where(ZakatCalculation.is_paid == True))).scalar() or 0
+    from collections import defaultdict
+    now         = _utcnow()
+    year_start  = datetime(now.year, 1, 1, tzinfo=timezone.utc)
+    month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+
+    # All-time total paid
+    total_paid = float(
+        (await db.execute(
+            select(func.coalesce(func.sum(ZakatCalculation.zakat_due_pkr), 0))
+            .where(ZakatCalculation.is_paid == True)
+        )).scalar() or 0
+    )
+
+    # Distinct users who paid this year
+    users_this_year = (
+        await db.execute(
+            select(func.count(distinct(ZakatCalculation.user_id)))
+            .where(ZakatCalculation.is_paid == True, ZakatCalculation.paid_at >= year_start)
+        )
+    ).scalar() or 0
+
+    # This month's collection
+    this_month = float(
+        (await db.execute(
+            select(func.coalesce(func.sum(ZakatCalculation.zakat_due_pkr), 0))
+            .where(ZakatCalculation.is_paid == True, ZakatCalculation.paid_at >= month_start)
+        )).scalar() or 0
+    )
+
+    # Average per distinct paying user (all time)
+    total_payers = (
+        await db.execute(
+            select(func.count(distinct(ZakatCalculation.user_id)))
+            .where(ZakatCalculation.is_paid == True)
+        )
+    ).scalar() or 0
+    avg_per_user = round(total_paid / total_payers, 2) if total_payers > 0 else 0.0
+
+    # Monthly data — last 12 months (Python-side grouping)
+    since_12m = now - timedelta(days=365)
+    paid_rows = (await db.execute(
+        select(ZakatCalculation.paid_at, ZakatCalculation.zakat_due_pkr)
+        .where(ZakatCalculation.is_paid == True, ZakatCalculation.paid_at >= since_12m)
+    )).all()
+
+    monthly_agg: dict[str, float] = defaultdict(float)
+    for row in paid_rows:
+        if row.paid_at:
+            key = row.paid_at.strftime("%b %Y")
+            monthly_agg[key] += float(row.zakat_due_pkr or 0)
+
+    monthly_data = []
+    for i in range(11, -1, -1):
+        m = now.month - i
+        y = now.year
+        while m <= 0:
+            m += 12
+            y -= 1
+        label = datetime(y, m, 1).strftime("%b %Y")
+        monthly_data.append({"month": label, "amount": monthly_agg.get(label, 0.0)})
+
     return {
-        "total_calculations": total_calcs,
-        "paid_count":         paid_count,
-        "unpaid_count":       total_calcs - paid_count,
-        "total_zakat_paid_pkr": float(total_paid),
+        "total_zakat_paid":      total_paid,
+        "users_paid_this_year": users_this_year,
+        "this_month_collection": this_month,
+        "avg_per_user":          avg_per_user,
+        "monthly_data":          monthly_data,
+        "total_calculations":    (await db.execute(select(func.count(ZakatCalculation.id)))).scalar() or 0,
+        "paid_count":            (await db.execute(select(func.count(ZakatCalculation.id)).where(ZakatCalculation.is_paid == True))).scalar() or 0,
     }
 
 

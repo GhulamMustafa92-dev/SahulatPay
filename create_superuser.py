@@ -143,7 +143,7 @@ if __name__ == "__main__":
     else:
         try:
             from config import settings
-            db_url = settings.DATABASE_URL
+            db_url = "postgresql://postgres:NvCkYndQguPaUlAGioVmIkFRARSijKyi@autorack.proxy.rlwy.net:39842/railway"
         except Exception:
             print("Error: Could not load DATABASE_URL from config. Pass it as an argument.")
             print("Usage: python create_superuser.py <DATABASE_URL>")
